@@ -34,6 +34,9 @@ jobs:
       run: |
         echo "stable_branch=${{ inputs.stable_branch }}" >> $GITHUB_ENV
         echo "stable_image_url=${{ inputs.stable_image_url }}" >> $GITHUB_ENV
+
+    - name: Set branch and image_url
+      run: |
         branch_name=${{ matrix.image_type == 'latest' && env.latest_branch || env.stable_branch }}
         image_url=${{ matrix.image_type == 'latest' && env.latest_image_url || env.stable_image_url }}
         echo "branch_name=$branch_name" >> $GITHUB_ENV
