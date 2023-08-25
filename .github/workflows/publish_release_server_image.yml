@@ -1,0 +1,72 @@
+name: "publish release version server docker image manually"
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        required: true
+        default: ''
+      branch:
+        required: false
+        default: ''
+
+jobs:
+  build_latest:
+    runs-on: ubuntu-latest
+    env:
+      repository_url: apache/incubator-hugegraph
+      image_url: hugegraph/hugegraph:${{inputs.tag}}
+      branch: release-${{inputs.tag}}
+
+    steps:
+    - name: Set branch
+      run: |
+        branch=${{ inputs.branch=='' && env.branch || inputs.branch }}
+        echo "branch=$branch" >> $GITHUB_ENV
+        
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Checkout latest
+      uses: actions/checkout@v3
+      with:
+        repository: ${{ env.repository_url }}
+        ref: ${{ env.branch }}
+        fetch-depth: 2
+
+    - name: Build X86 Image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        load: true
+        tags: ${{ env.image_url }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Test X86 Image
+      run: |
+        echo "$image_url"
+        docker images
+        docker run -itd --name=graph -p 18080:8080 ${{env.image_url}}
+        sleep 20s
+        curl 0.0.0.0:18080 || exit
+        docker ps -a
+        sleep 20s
+        curl 0.0.0.0:18080 || exit
+        docker ps -a
+
+    - name: Build ARM & Push all
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ env.image_url }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
