@@ -2,11 +2,8 @@ name: "publish release version server docker image manually"
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        required: true
-        default: ''
       branch:
-        required: false
+        required: true
         default: ''
 
 jobs:
@@ -14,14 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       repository_url: apache/incubator-hugegraph
-      image_url: hugegraph/hugegraph:${{inputs.tag}}
-      branch: release-${{inputs.tag}}
+      branch: ${{inputs.branch}}
 
     steps:
-    - name: Set branch
+    - name: Set image_url
       run: |
-        branch=${{ inputs.branch=='' && env.branch || inputs.branch }}
-        echo "branch=$branch" >> $GITHUB_ENV
+        image_url=hugegraph/hugegraph:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
+        echo "image_url=$image_url" >> $GITHUB_ENV
         
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
@@ -52,7 +48,7 @@ jobs:
       run: |
         echo "$image_url"
         docker images
-        docker run -itd --name=graph -p 18080:8080 ${{env.image_url}}
+        docker run -itd --name=graph -p 18080:8080 $image_url
         sleep 20s
         curl 0.0.0.0:18080 || exit
         docker ps -a
