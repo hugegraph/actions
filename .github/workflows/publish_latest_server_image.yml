@@ -1,4 +1,4 @@
-name: "Publish latest server docker image automatically"
+name: "Publish server image(latest)"
 # todo: expand the yaml to deal with multi release version 
 on:
   schedule:
@@ -9,7 +9,7 @@ jobs:
   build_latest:
     runs-on: ubuntu-latest
     env:
-      repository_url: apache/incubator-hugegraph
+      repository_url: apache/hugegraph
       branch: master
       image_url: hugegraph/hugegraph:latest
 
@@ -30,19 +30,19 @@ jobs:
         ref: ${{ env.branch }}
         fetch-depth: 2
 
-    - name: Get current SHA
+    - name: Get current commit-hash
       run: |
-        current_sha=$(git rev-parse HEAD)
-        echo "current_sha=$current_sha" >> $GITHUB_ENV
+        current_commit_hash=$(git rev-parse HEAD)
+        echo "current_commit_hash=$current_commit_hash" >> $GITHUB_ENV
 
-    - name: Get last SHA
+    - name: Get last commit-hash
       run: |
-        is_update='true'
-        last_sha=${{vars.LATEST_SHA}}
-        if [[ "$current_sha" == "$last_sha" ]]; then
-          is_update='false'
+        last_commit_hash=${{vars.LAST_COMMIT_HASH}}
+        need_update='false'
+        if [[ "$current_commit_hash" != "$last_commit_hash" ]]; then
+          need_update='true'
         fi
-        echo "is_update=$is_update" >> $GITHUB_ENV
+        echo "need_update=$need_update" >> $GITHUB_ENV
 
     - name: Build X86 Image
       if: env.is_update == 'true'
@@ -78,20 +78,19 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-    - name: Updata last SHA
+    - name: Updata last commit-hash
+      if: env.is_update == 'true'
       env:
           GITHUB_TOKEN: ${{ secrets.PAT }}
-          OWNER: aroundabout
-          REPO: action_demo
+          OWNER: hugegraph
+          REPO: hugegraph-actions
       run: |
-        var_name='LATEST_SHA'
-        last_sha=${{vars.LATEST_SHA}}
-        if [[ "$current_sha" != "$last_sha" ]]; then
-          curl -L \
-          -X PATCH \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          -H "Authorization: Bearer ${{ env.GITHUB_TOKEN }}" \
-          https://api.github.com/repos/$OWNER/$REPO/actions/variables/$var_name \
-          -d '{"name":"'"$var_name"'","value":"'"${{ env.current_sha }}"'"}'
-        fi
+        var_name='LAST_COMMIT_HASH'
+        last_commit_hash=${{vars.LAST_COMMIT_HASH}}
+        curl -L \
+        -X PATCH \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        -H "Authorization: Bearer ${{ env.GITHUB_TOKEN }}" \
+        https://api.github.com/repos/$OWNER/$REPO/actions/variables/$var_name \
+        -d '{"name":"'"$var_name"'","value":"'"$current_commit_hash"'"}'
