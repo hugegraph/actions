@@ -18,8 +18,7 @@ jobs:
     - name: Set image_url
       run: |
         image_url=hugegraph/hugegraph:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
-        echo $image_url
-        echo "image_url=$image_url" >> $GITHUB_ENV
+        echo $image_url && echo "image_url=$image_url" >> $GITHUB_ENV
         
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
