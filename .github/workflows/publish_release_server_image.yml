@@ -17,7 +17,6 @@ jobs:
     steps:
     - name: Set image_url
       run: |
-        # The following RegExp matches branch_name like "release-1.0.0" or "release-1.0.0-rc"
         image_url=hugegraph/hugegraph:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
         echo $image_url
         echo "image_url=$image_url" >> $GITHUB_ENV
