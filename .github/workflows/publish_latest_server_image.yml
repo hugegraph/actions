@@ -44,6 +44,11 @@ jobs:
         fi
         echo "need_update=$need_update" >> $GITHUB_ENV
 
+        # To do: if github provide support for exit gracefully, replace if statements with exit.
+        # until 2023, there is no official support from github to use "exit gracefully"
+        # If exit 0, the left steps still continue. If exit 1, the action will fail.
+        # https://github.com/actions/runner/issues/662#issuecomment-1506792423
+
     - name: Build X86 Image
       if: env.need_update == 'true'
       uses: docker/build-push-action@v4
