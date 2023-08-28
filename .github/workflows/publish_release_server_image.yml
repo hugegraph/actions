@@ -11,8 +11,8 @@ jobs:
   build_latest:
     runs-on: ubuntu-latest
     env:
-      repository_url: apache/hugegraph
-      branch: ${{inputs.branch}}
+      REPOSITORY_URL: apache/hugegraph
+      BRANCH: ${{inputs.branch}}
 
     steps:
     - name: Set image_url
@@ -32,8 +32,8 @@ jobs:
     - name: Checkout latest
       uses: actions/checkout@v3
       with:
-        repository: ${{ env.repository_url }}
-        ref: ${{ env.branch }}
+        repository: ${{ env.REPOSITORY_URL }}
+        ref: ${{ env.BRANCH }}
         fetch-depth: 2
 
     - name: Build X86 Image

@@ -1,5 +1,5 @@
 name: "Publish server image(latest)"
-# todo: expand the yaml to deal with multi release version 
+
 on:
   schedule:
     - cron: '0 23 * * *'
@@ -9,10 +9,14 @@ jobs:
   build_latest:
     runs-on: ubuntu-latest
     env:
-      repository_url: apache/hugegraph
-      branch: master
-      image_url: hugegraph/hugegraph:latest
-
+      REPOSITORY_URL: apache/hugegraph
+      BRANCH: master
+      IMAGE_URL: hugegraph/hugegraph:latest
+      GITHUB_TOKEN: ${{ secrets.PAT }}
+      OWNER: hugegraph
+      REPO: actions
+      LAST_COMMIT_HASH: ${{vars.LAST_COMMIT_HASH}}
+      
     steps:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
@@ -26,41 +30,40 @@ jobs:
     - name: Checkout latest
       uses: actions/checkout@v3
       with:
-        repository: ${{ env.repository_url }}
-        ref: ${{ env.branch }}
+        repository: ${{ env.REPOSITORY_URL }}
+        ref: ${{ env.BRANCH }}
         fetch-depth: 2
 
     - name: Get current commit-hash
       run: |
         current_commit_hash=$(git rev-parse HEAD)
-        echo "current_commit_hash=$current_commit_hash" >> $GITHUB_ENV
+        echo "CURRENT_COMMIT_HASH=$current_commit_hash" >> $GITHUB_ENV
 
-    - name: Get last commit-hash
+    - name: Check if an update is needed
       run: |
-        last_commit_hash=${{vars.LAST_COMMIT_HASH}}
         need_update='false'
-        if [[ "$current_commit_hash" != "$last_commit_hash" ]]; then
+        if [[ "$CURRENT_COMMIT_HASH" != "$LAST_COMMIT_HASH" ]]; then
           need_update='true'
         fi
-        echo "need_update=$need_update" >> $GITHUB_ENV
+        echo "NEED_UPDATE=$need_update" >> $GITHUB_ENV
         # TODO: replace `if` statements for exit if github provide support for exit gracefully,
         # see https://github.com/actions/runner/issues/662 for more details
 
     - name: Build X86 Image
-      if: env.need_update == 'true'
+      if: env.NEED_UPDATE == 'true'
       uses: docker/build-push-action@v4
       with:
         context: .
         load: true
-        tags: ${{ env.image_url }}
+        tags: ${{ env.IMAGE_URL }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
     - name: Test X86 Image
-      if: env.need_update == 'true'
+      if: env.NEED_UPDATE == 'true'
       run: |
         docker images
-        docker run -itd --name=graph -p 18080:8080 $image_url
+        docker run -itd --name=graph -p 18080:8080 $IMAGE_URL
         sleep 20s
         curl 0.0.0.0:18080 || exit
         docker ps -a
@@ -69,29 +72,23 @@ jobs:
         docker ps -a
 
     - name: Build ARM & Push all
-      if: env.need_update == 'true'
+      if: env.NEED_UPDATE == 'true'
       uses: docker/build-push-action@v4
       with:
         context: .
         file: ./Dockerfile
         platforms: linux/amd64,linux/arm64
         push: true
-        tags: ${{ env.image_url }}
+        tags: ${{ env.IMAGE_URL }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
     - name: Updata last commit-hash
-      if: env.need_update == 'true'
-      env:
-          GITHUB_TOKEN: ${{ secrets.PAT }}
-          OWNER: hugegraph
-          REPO: hugegraph-actions
+      if: env.NEED_UPDATE == 'true'
       run: |
-        var_name='LAST_COMMIT_HASH'
-        last_commit_hash=${{vars.LAST_COMMIT_HASH}}
         curl -L -X PATCH \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
-        -H "Authorization: Bearer ${{ env.GITHUB_TOKEN }}" \
-        https://api.github.com/repos/$OWNER/$REPO/actions/variables/$var_name \
-        -d '{"name":"'"$var_name"'","value":"'"$current_commit_hash"'"}'
+        -H "Authorization: Bearer $GITHUB_TOKEN" \
+        https://api.github.com/repos/$OWNER/$REPO/actions/variables/LAST_COMMIT_HASH \
+        -d '{"name":"LAST_COMMIT_HASH","value":"'"$CURRENT_COMMIT_HASH"'"}'
