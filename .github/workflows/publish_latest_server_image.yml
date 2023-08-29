@@ -50,7 +50,7 @@ jobs:
         # see https://github.com/actions/runner/issues/662 for more details
 
     - name: Build X86 Image
-      if: env.NEED_UPDATE == 'true'
+      if: ${{ env.NEED_UPDATE == 'true' }}
       uses: docker/build-push-action@v4
       with:
         context: .
@@ -60,7 +60,7 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Test X86 Image
-      if: env.NEED_UPDATE == 'true'
+      if: ${{ env.NEED_UPDATE == 'true' }}
       run: |
         docker images
         docker run -itd --name=graph -p 18080:8080 $IMAGE_URL
@@ -72,7 +72,7 @@ jobs:
         docker ps -a
 
     - name: Build ARM & Push all
-      if: env.NEED_UPDATE == 'true'
+      if: ${{ env.NEED_UPDATE == 'true' }}
       uses: docker/build-push-action@v4
       with:
         context: .
@@ -84,7 +84,7 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Updata last commit-hash
-      if: env.NEED_UPDATE == 'true'
+      if: ${{ env.NEED_UPDATE == 'true' }}
       run: |
         curl -L -X PATCH \
         -H "Accept: application/vnd.github+json" \
