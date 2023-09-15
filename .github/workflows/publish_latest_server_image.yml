@@ -12,7 +12,7 @@ jobs:
       REPOSITORY_URL: apache/hugegraph
       BRANCH: master
       IMAGE_URL: hugegraph/hugegraph:latest
-      GITHUB_TOKEN: ${{ secrets.PAT }}
+      GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       OWNER: hugegraph
       REPO: actions
       LAST_COMMIT_HASH: ${{vars.LAST_COMMIT_HASH}}
