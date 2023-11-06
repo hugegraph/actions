@@ -1,0 +1,48 @@
+name: "Publish loader image(release)"
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        required: true
+        default: ''
+        description: 'The branch name should be like *-x.x.x, for example release-1.0.0'
+
+jobs:
+  build_latest:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY_URL: apache/hugegraph-toolchain
+      BRANCH: ${{inputs.branch}}
+
+    steps:
+    - name: Set image_url
+      run: |
+        image_url=hugegraph/loader:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
+        echo $image_url && echo "IMAGE_URL=$image_url" >> $GITHUB_ENV
+        
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Checkout latest
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.REPOSITORY_URL }}
+        ref: ${{ env.BRANCH }}
+        fetch-depth: 2
+
+    - name: Build X86 &ARM And Push All
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./hugegraph-loader/Dockerfile
+        platforms: linux/amd64,linux/arm64
+        tags: ${{ env.IMAGE_URL }}
+        push: true
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
