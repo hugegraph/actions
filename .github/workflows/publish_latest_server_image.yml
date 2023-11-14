@@ -15,7 +15,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       OWNER: hugegraph
       REPO: actions
-      LAST_COMMIT_HASH: ${{vars.LAST_COMMIT_HASH}}
+      LAST_SERVER_HASH: ${{vars.LAST_SERVER_HASH}}
       
     steps:
     - name: Set up Docker Buildx
@@ -42,7 +42,7 @@ jobs:
     - name: Check if an update is needed
       run: |
         need_update='false'
-        if [[ "$CURRENT_COMMIT_HASH" != "$LAST_COMMIT_HASH" ]]; then
+        if [[ "$CURRENT_COMMIT_HASH" != "$LAST_SERVER_HASH" ]]; then
           need_update='true'
         fi
         echo "NEED_UPDATE=$need_update" >> $GITHUB_ENV
@@ -90,5 +90,5 @@ jobs:
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         -H "Authorization: Bearer $GITHUB_TOKEN" \
-        https://api.github.com/repos/$OWNER/$REPO/actions/variables/LAST_COMMIT_HASH \
-        -d '{"name":"LAST_COMMIT_HASH","value":"'"$CURRENT_COMMIT_HASH"'"}'
+        https://api.github.com/repos/$OWNER/$REPO/actions/variables/LAST_SERVER_HASH \
+        -d '{"name":"LAST_SERVER_HASH","value":"'"$CURRENT_COMMIT_HASH"'"}'
