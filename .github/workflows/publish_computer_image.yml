@@ -19,16 +19,28 @@ on:
         default: 'hugegraph/hugegraph-computer-operator:latest'
       manager_image_url:
         required: true
-        default: 'hugegraph/hugegraph-computer-operator-manager:latest'  
+        default: 'hugegraph/hugegraph-computer-operator-manager:latest'
+      # TODO: avoid to use the fixed version
+      version:
+        required: true
+        default: '1.2.0'
+        description: 'the current release version'
       docker_registry_url:
         required: false
         default: ''
+      maven_args:
+        required: false
+        default: ''
+        description: 'mvn build args, like "-P stage"'
+
 env:
   repository_url: apache/hugegraph-computer
   repository_branch: master
   computer_image_url: hugegraph/hugegraph-computer:latest
   operator_image_url: hugegraph/hugegraph-computer-operator:latest
-  docker_registry_url: ""
+  version: 1.2.0
+  docker_registry_url: ''
+  maven_args: ''
 
 jobs:
   build:
@@ -43,7 +55,9 @@ jobs:
          echo "operator_image_url=${{ github.event.inputs.operator_image_url }}" >> $GITHUB_ENV
          echo "manager_image_url=${{ github.event.inputs.manager_image_url }}" >> $GITHUB_ENV         
          echo "docker_registry_url=${{ github.event.inputs.docker_registry_url }}" >> $GITHUB_ENV
-          
+         echo "maven_args=${{ github.event.inputs.maven_args }}" >> $GITHUB_ENV
+         echo "version=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         
@@ -81,7 +95,7 @@ jobs:
       
       - name: Package
         run: |
-          mvn clean package -DskipTests
+          mvn clean package ${{ env.maven_args }} -DskipTests
 
       - name: Build CRD
         run: |
@@ -92,7 +106,7 @@ jobs:
       - name: Build Computer Image
         uses: docker/build-push-action@v5
         with:
-          context: ./apache-hugegraph-computer-incubating-1.0.0
+          context: ./apache-hugegraph-computer-incubating-${{ env.version }}
           file: ./computer-dist/Dockerfile
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.computer_image_url }}

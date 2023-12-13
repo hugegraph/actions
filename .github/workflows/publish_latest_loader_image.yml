@@ -4,7 +4,11 @@ on:
   schedule:
     - cron: '0 23 * * *'
   workflow_dispatch:
-
+    mvn_args:
+      required: false
+      default: ''
+      description: 'mvn build args, like "MAVEN_ARGS=-P stage"'
+      
 jobs:
   build_latest:
     runs-on: ubuntu-latest
@@ -16,7 +20,8 @@ jobs:
       OWNER: hugegraph
       REPO: actions
       LAST_LOADER_HASH: ${{vars.LAST_LOADER_HASH}}
-      
+      MVN_ARGS: ${{inputs.mvn_args}}
+
     steps:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -60,6 +65,7 @@ jobs:
         push: true
         cache-from: type=gha
         cache-to: type=gha,mode=max
+        build-args: ${{ env.MVN_ARGS }}
 
     - name: Updata last commit-hash
       if: ${{ env.NEED_UPDATE == 'true' }}
