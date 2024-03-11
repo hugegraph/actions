@@ -50,6 +50,8 @@ jobs:
         need_update='false'
         if [[ "$CURRENT_COMMIT_HASH" != "$LAST_SERVER_HASH" ]]; then
           need_update='true'
+        else
+          docker pull hugegraph/hugegraph
         fi
         echo "NEED_UPDATE=$need_update" >> $GITHUB_ENV
         # TODO: replace `if` statements for exit if github provide support for exit gracefully,
