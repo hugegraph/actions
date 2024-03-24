@@ -5,10 +5,10 @@ on:
     inputs:
       release_version:
         required: true
-        default: '1.2.0'
+        default: '1.3.0'
       gpg_user:
         required: true
-        default: 'imbajin'
+        default: 'JackyYang'
 
   push:
     branches:
