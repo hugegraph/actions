@@ -5,9 +5,11 @@ on:
     inputs:
       release_version:
         required: true
-        default: '1.2.0'
+        description: check version
+        default: '1.3.0'
       gpg_user:
         required: true
+        description: release gpg user
         default: 'imbajin'
 
   push:
