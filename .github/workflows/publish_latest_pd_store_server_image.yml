@@ -17,10 +17,8 @@ jobs:
       PD_IMAGE_URL: hugegraph/pd:latest
       STORE_IMAGE_URL: hugegraph/store:latest
       SERVER_IMAGE_URL: hugegraph/server:latest
-      GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       OWNER: hugegraph
       REPO: actions
-      LAST_SERVER_HASH: ${{vars.LAST_SERVER_HASH}}
       MVN_ARGS: ${{inputs.mvn_args}}
 
     steps:
