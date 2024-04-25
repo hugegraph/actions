@@ -50,6 +50,10 @@ jobs:
         cache-to: type=gha,mode=max
         build-args: ${{ env.MVN_ARGS }}
 
+    - name: Test
+      run: |
+        docker images
+
     - name: Build x86 PD Image
       uses: docker/build-push-action@v5
       with:
