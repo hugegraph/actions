@@ -14,12 +14,9 @@ jobs:
     env:
       REPOSITORY_URL: apache/hugegraph
       BRANCH: pd-store-docker
-      HG_BUILD_IMAGE_URL: hugegraph/hugegraph.build:latest
       PD_IMAGE_URL: hugegraph/pd:latest
       STORE_IMAGE_URL: hugegraph/store:latest
       SERVER_IMAGE_URL: hugegraph/server:latest
-      OWNER: hugegraph
-      REPO: actions
       MVN_ARGS: ${{inputs.mvn_args}}
 
     steps:
@@ -38,21 +35,6 @@ jobs:
         repository: ${{ env.REPOSITORY_URL }}
         ref: ${{ env.BRANCH }}
         fetch-depth: 2
-
-    - name: Build HugeGraph
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile.build
-        load: true
-        tags: ${{ env.HG_BUILD_IMAGE_URL }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
-
-    - name: Test
-      run: |
-        docker images
 
     - name: Build x86 PD Image
       uses: docker/build-push-action@v5
