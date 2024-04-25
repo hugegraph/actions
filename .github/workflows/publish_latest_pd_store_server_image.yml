@@ -38,11 +38,11 @@ jobs:
         ref: ${{ env.BRANCH }}
         fetch-depth: 2
 
-    - name: Build Hugegraph
+    - name: Build HugeGraph
       run: |
         docker build -f Dockerfile.build -t hugegraph/hugegraph.build .
 
-    - name: Build X86 PD Image
+    - name: Build x86 PD Image
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -53,7 +53,7 @@ jobs:
         cache-to: type=gha,mode=max
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Build X86 Store Image
+    - name: Build x86 Store Image
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -64,7 +64,7 @@ jobs:
         cache-to: type=gha,mode=max
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Build X86 Server Image
+    - name: Build x86 Server Image
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -75,7 +75,7 @@ jobs:
         cache-to: type=gha,mode=max
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Test X86 Images
+    - name: Test x86 Images
       run: |
         docker images
         docker run -itd --name=pd --network host $PD_IMAGE_URL
@@ -90,7 +90,7 @@ jobs:
         curl 0.0.0.0:8080 || exit
         docker ps -a
 
-    - name: Push X86 & ARM PD Images
+    - name: Push x86 & ARM PD Images
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -102,7 +102,7 @@ jobs:
         cache-to: type=gha,mode=max
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Push X86 & ARM Store Images
+    - name: Push x86 & ARM Store Images
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -114,7 +114,7 @@ jobs:
         cache-to: type=gha,mode=max
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Push X86 & ARM Server Images
+    - name: Push x86 & ARM Server Images
       uses: docker/build-push-action@v5
       with:
         context: .
