@@ -74,12 +74,11 @@ jobs:
         docker images
         docker run -itd --name=pd --network host $PD_IMAGE_URL
         sleep 10s
+        curl 0.0.0.0:8620 || exit
         docker run -itd --name=store --network host $STORE_IMAGE_URL
         sleep 10s
+        curl 0.0.0.0:8520 || exit
         docker run -itd --name=server --network host $SERVER_IMAGE_URL
-        sleep 10s
-        curl 0.0.0.0:8080 || exit
-        docker ps -a
         sleep 10s
         curl 0.0.0.0:8080 || exit
         docker ps -a
