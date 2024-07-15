@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: apache/hugegraph
-      BRANCH: pd-store-docker
+      BRANCH: master
       PD_IMAGE_URL: hugegraph/pd:latest
       STORE_IMAGE_URL: hugegraph/store:latest
       SERVER_IMAGE_URL: hugegraph/server:latest
