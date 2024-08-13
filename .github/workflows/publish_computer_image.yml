@@ -1,4 +1,4 @@
-name: Publish hugegraph-computer image
+name: Publish computer image
 
 on:
 #  schedule:
