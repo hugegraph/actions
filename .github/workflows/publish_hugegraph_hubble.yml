@@ -1,4 +1,4 @@
-name: Publish hugegraph-hubble image
+name: Publish hubble image
 
 on:
   schedule:
