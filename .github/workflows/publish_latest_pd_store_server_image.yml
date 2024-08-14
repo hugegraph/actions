@@ -62,7 +62,7 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./hugegraph-server/Dockerfile
+        file: ./hugegraph-server/Dockerfile-hstore
         load: true
         tags: ${{ env.SERVER_IMAGE_URL }}
         cache-from: type=gha
