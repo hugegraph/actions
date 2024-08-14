@@ -20,6 +20,18 @@ jobs:
       MVN_ARGS: ${{inputs.mvn_args}}
 
     steps:
+    - name: Maximize Build Space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 512
+        swap-size-mb: 1024
+        remove-dotnet: 'true'
+
+    - name: Check Free Space
+      run: |
+        echo "Free Space:"
+        df -h
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
