@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: apache/hugegraph
-      BRANCH: fix-docker
+      BRANCH: master
       IMAGE_URL: hugegraph/hugegraph:latest
       GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       OWNER: hugegraph
