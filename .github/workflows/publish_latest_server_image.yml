@@ -21,7 +21,7 @@ jobs:
       OWNER: hugegraph
       REPO: actions
       LAST_SERVER_HASH: ${{vars.LAST_SERVER_HASH}}
-      MVN_ARGS: ${{inputs.mvn_args}}
+      MVN_ARGS: ${{ github.event.inputs.mvn_args || 'MAVEN_ARGS=-P stage' }}
 
     steps:
     - name: Set up Docker Buildx
