@@ -17,9 +17,8 @@ jobs:
     steps:
     - name: Set image_url
       run: |
-        image_url=hugegraph/graphrag:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
-        echo $image_url && echo "IMAGE_URL=$image_url" >> $GITHUB_ENV
-
+        version=$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)') || exit 1
+        echo "IMAGE_URL=hugegraph/graphrag:$version" >> $GITHUB_ENV
     - name: Set image_url_nk
       run: |
         image_url_nk=hugegraph/graphrag_nk:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
