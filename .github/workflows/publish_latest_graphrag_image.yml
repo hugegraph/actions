@@ -1,4 +1,4 @@
-name: "Publish graphrag image(latest)"
+name: "Publish Graph-AI Image(latest)"
 
 on:
   workflow_dispatch:
@@ -11,8 +11,8 @@ jobs:
     env:
       REPOSITORY_URL: apache/incubator-hugegraph-ai
       BRANCH: master
-      IMAGE_URL: hugegraph/graphrag:latest
-      IMAGE_URL_NK: hugegraph/graphrag_nk:latest
+      IMAGE_URL: hugegraph/rag:latest
+      IMAGE_URL_NK: hugegraph/rag-bin:latest
       GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       OWNER: hugegraph
       REPO: actions

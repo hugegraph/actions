@@ -1,4 +1,4 @@
-name: "Publish graphrag image(release)"
+name: "Publish AI Image(release)"
 on:
   workflow_dispatch:
     inputs:
@@ -18,10 +18,10 @@ jobs:
     - name: Set image_url
       run: |
         version=$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)') || exit 1
-        echo "IMAGE_URL=hugegraph/graphrag:$version" >> $GITHUB_ENV
+        echo "IMAGE_URL=hugegraph/rag:$version" >> $GITHUB_ENV
     - name: Set image_url_nk
       run: |
-        image_url_nk=hugegraph/graphrag_nk:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
+        image_url_nk=hugegraph/rag-bin:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
         echo $image_url_nk && echo "IMAGE_URL_NK=$image_url_nk" >> $GITHUB_ENV
      
     - name: Set up Docker Buildx
@@ -40,7 +40,7 @@ jobs:
         ref: ${{ env.BRANCH }}
         fetch-depth: 2
 
-    - name: Build X86 &ARM And Push All
+    - name: Build X86 & ARM and Push All
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -51,7 +51,7 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-    - name: Build Binary X86 &ARM And Push All
+    - name: Build Binary X86 & ARM and Push All
       uses: docker/build-push-action@v5
       with:
         context: .
