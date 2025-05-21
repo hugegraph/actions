@@ -1,4 +1,4 @@
-name: "Publish Graph-AI Image(latest)"
+name: "Publish AI Image(latest)"
 
 on:
   workflow_dispatch:
