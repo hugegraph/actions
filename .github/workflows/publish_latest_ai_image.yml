@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: apache/incubator-hugegraph-ai
-      BRANCH: master
+      BRANCH: main
       IMAGE_URL: hugegraph/rag:latest
       IMAGE_URL_NK: hugegraph/rag-bin:latest
       GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
