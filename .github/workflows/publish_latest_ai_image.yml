@@ -1,9 +1,9 @@
 name: "Publish AI Image(latest)"
 
 on:
-  workflow_dispatch:
   schedule:
     - cron: '0 23 * * *'
+  workflow_dispatch:
       
 jobs:
   build_latest:
