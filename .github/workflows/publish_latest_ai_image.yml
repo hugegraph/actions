@@ -68,7 +68,8 @@ jobs:
       with:
         context: .
         file: ./docker/Dockerfile.nk
-        platforms: linux/amd64,linux/arm64
+        # platforms: linux/amd64,linux/arm64
+        platforms: linux/amd64
         tags: ${{ env.IMAGE_URL_NK }}
         push: true
         cache-from: type=gha
