@@ -12,6 +12,7 @@ jobs:
       REPOSITORY_URL: apache/incubator-hugegraph-ai
       BRANCH: main
       IMAGE_URL: hugegraph/rag:latest
+      IMAGE_URL_NK: hugegraph/rag-bin:latest
       GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       OWNER: hugegraph
       REPO: actions
@@ -57,6 +58,19 @@ jobs:
         file: ./docker/Dockerfile.llm
         platforms: linux/amd64,linux/arm64
         tags: ${{ env.IMAGE_URL }}
+        push: true
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Build Binary X86 And Push All
+      uses: docker/build-push-action@v5
+      if: ${{ env.NEED_UPDATE == 'true' }}
+      with:
+        context: .
+        file: ./docker/Dockerfile.nk
+        # platforms: linux/amd64,linux/arm64
+        platforms: linux/amd64
+        tags: ${{ env.IMAGE_URL_NK }}
         push: true
         cache-from: type=gha
         cache-to: type=gha,mode=max
