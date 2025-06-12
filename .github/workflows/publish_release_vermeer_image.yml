@@ -23,7 +23,7 @@ jobs:
           echo "Error: Branch name does not contain a valid version number (x.x.x)." >&2
           exit 1
         fi
-        image_url=apache/incubator-hugegraph-computer:$version
+        image_url=apache/vermeer:$version
         echo $image_url && echo "IMAGE_URL=$image_url" >> $GITHUB_ENV
 
     - name: Set up Docker Buildx
