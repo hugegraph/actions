@@ -18,7 +18,12 @@ jobs:
     steps:
     - name: Set image_url
       run: |
-        image_url=apache/incubator-hugegraph-computer:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
+        version=$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
+        if [ -z "$version" ]; then
+          echo "Error: Branch name does not contain a valid version number (x.x.x)." >&2
+          exit 1
+        fi
+        image_url=apache/incubator-hugegraph-computer:$version
         echo $image_url && echo "IMAGE_URL=$image_url" >> $GITHUB_ENV
 
     - name: Set up Docker Buildx
