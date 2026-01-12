@@ -5,7 +5,7 @@ on:
     inputs:
       mvn_args:
         required: false
-        default: 'MAVEN_ARGS=-P stage'
+        default: ''
         description: 'mvn build args, like "MAVEN_ARGS=-P stage"'
  
 jobs:
