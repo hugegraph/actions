@@ -18,8 +18,20 @@ jobs:
       component: server
       repository_url: apache/hugegraph
       branch: master
-      build_matrix_json: >-
-        [{"module":"server","context":".","dockerfile":"./hugegraph-server/Dockerfile","image_repo_latest":"hugegraph/hugegraph","image_repo_release":"hugegraph/hugegraph","platforms_latest":"linux/amd64,linux/arm64","platforms_release":"linux/amd64,linux/arm64","smoke_test":true,"smoke_test_cmd":"docker rm -f graph >/dev/null 2>&1 || true; docker run -itd --name=graph -p 18080:8080 $IMAGE_URL; sleep 20s; curl 0.0.0.0:18080 || exit 1; docker ps -a; sleep 20s; curl 0.0.0.0:18080 || exit 1; docker ps -a"}]
+      build_matrix_json: |
+        [
+          {
+            "module": "server",
+            "context": ".",
+            "dockerfile": "./hugegraph-server/Dockerfile",
+            "image_repo_latest": "hugegraph/hugegraph",
+            "image_repo_release": "hugegraph/hugegraph",
+            "platforms_latest": "linux/amd64,linux/arm64",
+            "platforms_release": "linux/amd64,linux/arm64",
+            "smoke_test": true,
+            "smoke_test_cmd": "docker rm -f graph >/dev/null 2>&1 || true; docker run -itd --name=graph -p 18080:8080 $IMAGE_URL; sleep 20s; curl 0.0.0.0:18080 || exit 1; docker ps -a; sleep 20s; curl 0.0.0.0:18080 || exit 1; docker ps -a"
+          }
+        ]
       use_mvn_args: true
       mvn_args: ${{ github.event.inputs.mvn_args || 'MAVEN_ARGS=-P stage' }}
       enable_hash_gate: true

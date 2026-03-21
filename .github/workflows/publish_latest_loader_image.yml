@@ -18,8 +18,19 @@ jobs:
       component: loader
       repository_url: apache/hugegraph-toolchain
       branch: master
-      build_matrix_json: >-
-        [{"module":"loader","context":".","dockerfile":"./hugegraph-loader/Dockerfile","image_repo_latest":"hugegraph/loader","image_repo_release":"hugegraph/loader","platforms_latest":"linux/amd64,linux/arm64","platforms_release":"linux/amd64,linux/arm64","smoke_test":false}]
+      build_matrix_json: |
+        [
+          {
+            "module": "loader",
+            "context": ".",
+            "dockerfile": "./hugegraph-loader/Dockerfile",
+            "image_repo_latest": "hugegraph/loader",
+            "image_repo_release": "hugegraph/loader",
+            "platforms_latest": "linux/amd64,linux/arm64",
+            "platforms_release": "linux/amd64,linux/arm64",
+            "smoke_test": false
+          }
+        ]
       use_mvn_args: true
       mvn_args: ${{ github.event.inputs.mvn_args || 'MAVEN_ARGS=-P stage' }}
       enable_hash_gate: true

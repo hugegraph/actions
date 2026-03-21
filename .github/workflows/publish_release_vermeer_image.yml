@@ -16,6 +16,17 @@ jobs:
       component: vermeer
       repository_url: apache/incubator-hugegraph-computer
       branch: ${{ inputs.branch }}
-      build_matrix_json: >-
-        [{"module":"vermeer","context":"./vermeer","dockerfile":"./vermeer/Dockerfile","image_repo_latest":"hugegraph/vermeer","image_repo_release":"apache/vermeer","platforms_latest":"linux/amd64,linux/arm64","platforms_release":"linux/amd64,linux/arm64","smoke_test":false}]
+      build_matrix_json: |
+        [
+          {
+            "module": "vermeer",
+            "context": "./vermeer",
+            "dockerfile": "./vermeer/Dockerfile",
+            "image_repo_latest": "hugegraph/vermeer",
+            "image_repo_release": "apache/vermeer",
+            "platforms_latest": "linux/amd64,linux/arm64",
+            "platforms_release": "linux/amd64,linux/arm64",
+            "smoke_test": false
+          }
+        ]
     secrets: inherit

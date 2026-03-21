@@ -13,8 +13,29 @@ jobs:
       component: ai
       repository_url: apache/incubator-hugegraph-ai
       branch: main
-      build_matrix_json: >-
-        [{"module":"rag","context":".","dockerfile":"./docker/Dockerfile.llm","image_repo_latest":"hugegraph/rag","image_repo_release":"hugegraph/rag","platforms_latest":"linux/amd64,linux/arm64","platforms_release":"linux/amd64","smoke_test":false},{"module":"rag-bin","context":".","dockerfile":"./docker/Dockerfile.nk","image_repo_latest":"hugegraph/rag-bin","image_repo_release":"hugegraph/rag-bin","platforms_latest":"linux/amd64","platforms_release":"linux/amd64","smoke_test":false}]
+      build_matrix_json: |
+        [
+          {
+            "module": "rag",
+            "context": ".",
+            "dockerfile": "./docker/Dockerfile.llm",
+            "image_repo_latest": "hugegraph/rag",
+            "image_repo_release": "hugegraph/rag",
+            "platforms_latest": "linux/amd64,linux/arm64",
+            "platforms_release": "linux/amd64",
+            "smoke_test": false
+          },
+          {
+            "module": "rag-bin",
+            "context": ".",
+            "dockerfile": "./docker/Dockerfile.nk",
+            "image_repo_latest": "hugegraph/rag-bin",
+            "image_repo_release": "hugegraph/rag-bin",
+            "platforms_latest": "linux/amd64",
+            "platforms_release": "linux/amd64",
+            "smoke_test": false
+          }
+        ]
       enable_hash_gate: true
       last_hash_value: ${{ vars.LAST_AI_HASH }}
       last_hash_name: LAST_AI_HASH

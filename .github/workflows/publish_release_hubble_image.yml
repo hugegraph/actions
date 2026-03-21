@@ -20,8 +20,19 @@ jobs:
       component: hubble
       repository_url: apache/hugegraph-toolchain
       branch: ${{ inputs.branch }}
-      build_matrix_json: >-
-        [{"module":"hubble","context":".","dockerfile":"./hugegraph-hubble/Dockerfile","image_repo_latest":"hugegraph/hubble","image_repo_release":"hugegraph/hubble","platforms_latest":"linux/amd64,linux/arm64","platforms_release":"linux/amd64,linux/arm64","smoke_test":false}]
+      build_matrix_json: |
+        [
+          {
+            "module": "hubble",
+            "context": ".",
+            "dockerfile": "./hugegraph-hubble/Dockerfile",
+            "image_repo_latest": "hugegraph/hubble",
+            "image_repo_release": "hugegraph/hubble",
+            "platforms_latest": "linux/amd64,linux/arm64",
+            "platforms_release": "linux/amd64,linux/arm64",
+            "smoke_test": false
+          }
+        ]
       use_mvn_args: true
       mvn_args: ${{ inputs.mvn_args }}
     secrets: inherit
