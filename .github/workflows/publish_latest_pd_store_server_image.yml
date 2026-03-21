@@ -12,6 +12,10 @@ on:
         required: false
         default: true
         description: 'whether integration precheck is mandatory before publish'
+      wait_timeout_sec:
+        required: false
+        default: '300'
+        description: 'docker compose wait timeout in seconds for precheck/self-check'
 
 concurrency:
   group: publish-latest-pd-store-server
@@ -44,6 +48,7 @@ jobs:
       STORE_IMAGE_URL: hugegraph/store:latest
       SERVER_IMAGE_URL: hugegraph/server:latest
       MVN_ARGS: ${{ github.event.inputs.mvn_args || '' }}
+      WAIT_TIMEOUT_SEC: ${{ github.event.inputs.wait_timeout_sec || '300' }}
 
     steps:
     - name: Checkout latest
@@ -63,6 +68,13 @@ jobs:
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Validate wait timeout
+      run: |
+        if ! [[ "$WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$WAIT_TIMEOUT_SEC" -lt 30 ] || [ "$WAIT_TIMEOUT_SEC" -gt 1800 ]; then
+          echo "Invalid wait_timeout_sec: $WAIT_TIMEOUT_SEC. Expected integer between 30 and 1800."
+          exit 1
+        fi
 
     - name: Pre-build disk usage
       run: |
@@ -126,7 +138,7 @@ jobs:
           -p hg-ci-precheck \
           -f docker/docker-compose.yml \
           -f /tmp/docker-compose.ci.override.yml \
-          up -d --wait --wait-timeout 300
+          up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
 
         docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml ps
 
@@ -193,6 +205,7 @@ jobs:
       REPOSITORY_URL: apache/hugegraph
       SOURCE_SHA: ${{ needs.resolve_source.outputs.source_sha }}
       MVN_ARGS: ${{ github.event.inputs.mvn_args || '' }}
+      WAIT_TIMEOUT_SEC: ${{ github.event.inputs.wait_timeout_sec || '300' }}
 
     steps:
     - name: Checkout latest
@@ -215,6 +228,13 @@ jobs:
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Validate wait timeout (${{ matrix.module }})
+      run: |
+        if ! [[ "$WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$WAIT_TIMEOUT_SEC" -lt 30 ] || [ "$WAIT_TIMEOUT_SEC" -gt 1800 ]; then
+          echo "Invalid wait_timeout_sec: $WAIT_TIMEOUT_SEC. Expected integer between 30 and 1800."
+          exit 1
+        fi
 
     - name: Pre-build disk usage (${{ matrix.module }})
       run: |
@@ -258,7 +278,7 @@ jobs:
           -p "$compose_project" \
           -f docker/docker-compose.yml \
           -f "$compose_override" \
-          up -d "$MODULE" --wait --wait-timeout 300
+          up -d "$MODULE" --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
 
         curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:$HOST_PORT$PROBE_PATH" >/dev/null
         echo "Self-check passed: http://127.0.0.1:$HOST_PORT$PROBE_PATH"
