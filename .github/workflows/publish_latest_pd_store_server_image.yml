@@ -253,6 +253,7 @@ jobs:
         docker builder prune -af || true
 
     - name: Build x86 image for self-check (${{ matrix.module }})
+      if: ${{ !matrix.skip_selfcheck }}
       uses: docker/build-push-action@v7
       with:
         context: .
