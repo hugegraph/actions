@@ -1,4 +1,5 @@
 name: "Publish AI Image(release)"
+
 on:
   workflow_dispatch:
     inputs:
@@ -8,56 +9,13 @@ on:
         description: 'The branch name should be like *-x.x.x, for example release-1.0.0'
 
 jobs:
-  build_latest:
-    runs-on: ubuntu-latest
-    env:
-      REPOSITORY_URL: apache/incubator-hugegraph-ai
-      BRANCH: ${{inputs.branch}}
-
-    steps:
-    - name: Set image_url
-      run: |
-        version=$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)') || exit 1
-        echo "IMAGE_URL=hugegraph/rag:$version" >> $GITHUB_ENV
-    - name: Set image_url_nk
-      run: |
-        image_url_nk=hugegraph/rag-bin:$(echo "${{ inputs.branch }}" | grep -oP '(\d+\.\d+\.\d+)')
-        echo $image_url_nk && echo "IMAGE_URL_NK=$image_url_nk" >> $GITHUB_ENV
-     
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Checkout latest
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ env.REPOSITORY_URL }}
-        ref: ${{ env.BRANCH }}
-        fetch-depth: 2
-
-    - name: Build X86 & ARM and Push All
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./docker/Dockerfile.llm
-        platforms: linux/amd64
-        tags: ${{ env.IMAGE_URL }}
-        push: true
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Build Binary X86 & ARM and Push All
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./docker/Dockerfile.nk
-        platforms: linux/amd64
-        tags: ${{ env.IMAGE_URL_NK }}
-        push: true
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+  publish:
+    uses: ./.github/workflows/_publish_image_reusable.yml
+    with:
+      mode: release
+      component: ai
+      repository_url: apache/incubator-hugegraph-ai
+      branch: ${{ inputs.branch }}
+      build_matrix_json: >-
+        [{"module":"rag","context":".","dockerfile":"./docker/Dockerfile.llm","image_repo_latest":"hugegraph/rag","image_repo_release":"hugegraph/rag","platforms_latest":"linux/amd64,linux/arm64","platforms_release":"linux/amd64","smoke_test":false},{"module":"rag-bin","context":".","dockerfile":"./docker/Dockerfile.nk","image_repo_latest":"hugegraph/rag-bin","image_repo_release":"hugegraph/rag-bin","platforms_latest":"linux/amd64","platforms_release":"linux/amd64","smoke_test":false}]
+    secrets: inherit

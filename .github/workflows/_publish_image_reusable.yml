@@ -1,0 +1,302 @@
+name: "Publish image (reusable)"
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "publish mode: latest or release"
+        required: true
+        type: string
+      component:
+        description: "component name for cache scope"
+        required: true
+        type: string
+      repository_url:
+        description: "source repository in owner/name format"
+        required: true
+        type: string
+      branch:
+        description: "source branch name"
+        required: true
+        type: string
+      build_matrix_json:
+        description: "build matrix JSON array"
+        required: true
+        type: string
+      use_mvn_args:
+        description: "whether to pass mvn args to build-args"
+        required: false
+        default: false
+        type: boolean
+      mvn_args:
+        description: "mvn build args"
+        required: false
+        default: ''
+        type: string
+      enable_hash_gate:
+        description: "whether to skip latest publish if source hash unchanged"
+        required: false
+        default: false
+        type: boolean
+      last_hash_value:
+        description: "last published source hash"
+        required: false
+        default: ''
+        type: string
+      last_hash_name:
+        description: "repo variable name for latest hash"
+        required: false
+        default: ''
+        type: string
+      hash_repo_owner:
+        description: "owner of repo storing LAST_* hash variable"
+        required: false
+        default: 'hugegraph'
+        type: string
+      hash_repo_name:
+        description: "repo name storing LAST_* hash variable"
+        required: false
+        default: 'actions'
+        type: string
+      no_update_pull_image:
+        description: "optional image to pull when latest hash unchanged"
+        required: false
+        default: ''
+        type: string
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_PASSWORD:
+        required: true
+      PERSONAL_ACCESS_TOKEN:
+        required: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      need_update: ${{ steps.prepare.outputs.need_update }}
+      source_sha: ${{ steps.prepare.outputs.source_sha }}
+      checkout_ref: ${{ steps.prepare.outputs.checkout_ref }}
+      version_tag: ${{ steps.prepare.outputs.version_tag }}
+    steps:
+    - name: Resolve mode and source ref
+      id: prepare
+      env:
+        MODE: ${{ inputs.mode }}
+        REPOSITORY_URL: ${{ inputs.repository_url }}
+        BRANCH: ${{ inputs.branch }}
+        ENABLE_HASH_GATE: ${{ inputs.enable_hash_gate }}
+        LAST_HASH_VALUE: ${{ inputs.last_hash_value }}
+      run: |
+        set -euo pipefail
+
+        if [ "$MODE" != "latest" ] && [ "$MODE" != "release" ]; then
+          echo "Invalid mode: $MODE. Expected latest or release."
+          exit 1
+        fi
+
+        source_sha="$(git ls-remote "https://github.com/${REPOSITORY_URL}.git" "refs/heads/${BRANCH}" | awk '{print $1}')"
+        if [ -z "$source_sha" ]; then
+          echo "Failed to resolve source SHA for ${REPOSITORY_URL}@${BRANCH}"
+          exit 1
+        fi
+
+        checkout_ref="$source_sha"
+
+        if [ "$MODE" = "latest" ]; then
+          version_tag="latest"
+          need_update="true"
+          if [ "$ENABLE_HASH_GATE" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
+            need_update="false"
+          fi
+        else
+          version_tag="$(echo "$BRANCH" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+          if [ -z "$version_tag" ]; then
+            echo "Branch name does not contain a valid version number (x.x.x): $BRANCH"
+            exit 1
+          fi
+          need_update="true"
+        fi
+
+        {
+          echo "source_sha=$source_sha"
+          echo "checkout_ref=$checkout_ref"
+          echo "version_tag=$version_tag"
+          echo "need_update=$need_update"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Pull image when latest hash unchanged
+      if: ${{ inputs.mode == 'latest' && steps.prepare.outputs.need_update == 'false' && inputs.no_update_pull_image != '' }}
+      run: |
+        docker pull "${{ inputs.no_update_pull_image }}"
+
+  publish:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.need_update == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.build_matrix_json) }}
+    steps:
+    - name: Resolve build parameters (${{ matrix.module }})
+      id: params
+      env:
+        MODE: ${{ inputs.mode }}
+        VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
+        COMPONENT: ${{ inputs.component }}
+        MODULE: ${{ matrix.module }}
+        IMAGE_REPO_LATEST: ${{ matrix.image_repo_latest }}
+        IMAGE_REPO_RELEASE: ${{ matrix.image_repo_release }}
+        PLATFORMS_LATEST: ${{ matrix.platforms_latest }}
+        PLATFORMS_RELEASE: ${{ matrix.platforms_release }}
+      run: |
+        set -euo pipefail
+
+        image_repo="$IMAGE_REPO_LATEST"
+        platforms="$PLATFORMS_LATEST"
+        if [ "$MODE" = "release" ]; then
+          image_repo="$IMAGE_REPO_RELEASE"
+          platforms="$PLATFORMS_RELEASE"
+        fi
+
+        if [ -z "$image_repo" ] || [ -z "$platforms" ]; then
+          echo "Missing image repo or platforms for module: $MODULE"
+          exit 1
+        fi
+
+        image_url="${image_repo}:${VERSION_TAG}"
+        cache_scope="${COMPONENT}-${MODULE}-${MODE}"
+
+        {
+          echo "image_url=$image_url"
+          echo "platforms=$platforms"
+          echo "cache_scope=$cache_scope"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Checkout source (${{ matrix.module }})
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.repository_url }}
+        ref: ${{ needs.prepare.outputs.checkout_ref }}
+        fetch-depth: 2
+
+    - name: Set up QEMU (${{ matrix.module }})
+      if: ${{ contains(steps.params.outputs.platforms, 'arm64') }}
+      uses: docker/setup-qemu-action@v4
+
+    - name: Set up Docker Buildx (${{ matrix.module }})
+      uses: docker/setup-buildx-action@v4
+      with:
+        version: latest
+
+    - name: Login to Docker Hub (${{ matrix.module }})
+      uses: docker/login-action@v4
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Build x86 image for smoke test with mvn args (${{ matrix.module }})
+      if: ${{ matrix.smoke_test && inputs.use_mvn_args }}
+      uses: docker/build-push-action@v7
+      with:
+        context: ${{ matrix.context }}
+        file: ${{ matrix.dockerfile }}
+        platforms: linux/amd64
+        load: true
+        tags: ${{ steps.params.outputs.image_url }}
+        cache-from: type=gha,scope=${{ steps.params.outputs.cache_scope }}
+        cache-to: type=gha,scope=${{ steps.params.outputs.cache_scope }},mode=min
+        build-args: ${{ inputs.mvn_args }}
+
+    - name: Build x86 image for smoke test (${{ matrix.module }})
+      if: ${{ matrix.smoke_test && !inputs.use_mvn_args }}
+      uses: docker/build-push-action@v7
+      with:
+        context: ${{ matrix.context }}
+        file: ${{ matrix.dockerfile }}
+        platforms: linux/amd64
+        load: true
+        tags: ${{ steps.params.outputs.image_url }}
+        cache-from: type=gha,scope=${{ steps.params.outputs.cache_scope }}
+        cache-to: type=gha,scope=${{ steps.params.outputs.cache_scope }},mode=min
+
+    - name: Run smoke test (${{ matrix.module }})
+      if: ${{ matrix.smoke_test }}
+      env:
+        IMAGE_URL: ${{ steps.params.outputs.image_url }}
+        SMOKE_TEST_CMD: ${{ matrix.smoke_test_cmd }}
+      run: |
+        set -euo pipefail
+        if [ -z "$SMOKE_TEST_CMD" ]; then
+          echo "smoke_test_cmd is empty while smoke_test=true"
+          exit 1
+        fi
+        eval "$SMOKE_TEST_CMD"
+
+    - name: Cleanup smoke test container (${{ matrix.module }})
+      if: ${{ always() && matrix.smoke_test }}
+      run: |
+        docker rm -f graph || true
+
+    - name: Build and push image with mvn args (${{ matrix.module }})
+      if: ${{ inputs.use_mvn_args }}
+      uses: docker/build-push-action@v7
+      with:
+        context: ${{ matrix.context }}
+        file: ${{ matrix.dockerfile }}
+        platforms: ${{ steps.params.outputs.platforms }}
+        push: true
+        tags: ${{ steps.params.outputs.image_url }}
+        cache-from: type=gha,scope=${{ steps.params.outputs.cache_scope }}
+        cache-to: type=gha,scope=${{ steps.params.outputs.cache_scope }},mode=max
+        build-args: ${{ inputs.mvn_args }}
+
+    - name: Build and push image (${{ matrix.module }})
+      if: ${{ !inputs.use_mvn_args }}
+      uses: docker/build-push-action@v7
+      with:
+        context: ${{ matrix.context }}
+        file: ${{ matrix.dockerfile }}
+        platforms: ${{ steps.params.outputs.platforms }}
+        push: true
+        tags: ${{ steps.params.outputs.image_url }}
+        cache-from: type=gha,scope=${{ steps.params.outputs.cache_scope }}
+        cache-to: type=gha,scope=${{ steps.params.outputs.cache_scope }},mode=max
+
+  update_latest_hash:
+    needs: [prepare, publish]
+    if: ${{ inputs.mode == 'latest' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Validate hash update inputs
+      env:
+        LAST_HASH_NAME: ${{ inputs.last_hash_name }}
+        PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+      run: |
+        set -euo pipefail
+        if [ -z "$LAST_HASH_NAME" ]; then
+          echo "last_hash_name is required when enable_hash_gate=true"
+          exit 1
+        fi
+        if [ -z "$PERSONAL_ACCESS_TOKEN" ]; then
+          echo "PERSONAL_ACCESS_TOKEN is required to update latest hash"
+          exit 1
+        fi
+
+    - name: Update latest source hash variable
+      env:
+        OWNER: ${{ inputs.hash_repo_owner }}
+        REPO: ${{ inputs.hash_repo_name }}
+        LAST_HASH_NAME: ${{ inputs.last_hash_name }}
+        SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+      run: |
+        set -euo pipefail
+        curl -L -X PATCH \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
+          "https://api.github.com/repos/$OWNER/$REPO/actions/variables/$LAST_HASH_NAME" \
+          -d '{"name":"'"$LAST_HASH_NAME"'","value":"'"$SOURCE_SHA"'"}'
