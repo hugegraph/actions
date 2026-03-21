@@ -7,9 +7,15 @@ on:
         required: false
         default: ''
         description: 'mvn build args, like "MAVEN_ARGS=-P stage"'
- 
+      strict_mode:
+        type: boolean
+        required: false
+        default: true
+        description: 'whether integration precheck is mandatory before publish'
+
 jobs:
-  build_latest:
+  integration_precheck:
+    if: ${{ github.event.inputs.strict_mode == 'true' }}
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: apache/hugegraph
@@ -17,15 +23,15 @@ jobs:
       PD_IMAGE_URL: hugegraph/pd:latest
       STORE_IMAGE_URL: hugegraph/store:latest
       SERVER_IMAGE_URL: hugegraph/server:latest
-      MVN_ARGS: ${{inputs.mvn_args}}
+      MVN_ARGS: ${{ github.event.inputs.mvn_args || '' }}
 
     steps:
-    # - name: Maximize Build Space
-    #   uses: easimon/maximize-build-space@master
-    #   with:
-    #     root-reserve-mb: 512
-    #     swap-size-mb: 1024
-    #     remove-dotnet: 'true'
+    - name: Checkout latest
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.REPOSITORY_URL }}
+        ref: ${{ env.BRANCH }}
+        fetch-depth: 2
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -36,6 +42,154 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
+    - name: Pre-build disk usage
+      run: |
+        df -h
+        docker system df || true
+
+    - name: Pre-build cleanup
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
+
+    - name: Build x86 PD image for integration check
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./hugegraph-pd/Dockerfile
+        load: true
+        tags: ${{ env.PD_IMAGE_URL }}
+        cache-from: type=gha,scope=latest-pd
+        cache-to: type=gha,scope=latest-pd,mode=min
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Build x86 Store image for integration check
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./hugegraph-store/Dockerfile
+        load: true
+        tags: ${{ env.STORE_IMAGE_URL }}
+        cache-from: type=gha,scope=latest-store
+        cache-to: type=gha,scope=latest-store,mode=min
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Build x86 Server image for integration check
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./hugegraph-server/Dockerfile-hstore
+        load: true
+        tags: ${{ env.SERVER_IMAGE_URL }}
+        cache-from: type=gha,scope=latest-server
+        cache-to: type=gha,scope=latest-server,mode=min
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Start compose stack with local images
+      run: |
+        cat > /tmp/docker-compose.ci.override.yml <<'COMPOSE_OVERRIDE'
+        services:
+          pd:
+            image: hugegraph/pd:latest
+            pull_policy: never
+          store:
+            image: hugegraph/store:latest
+            pull_policy: never
+          server:
+            image: hugegraph/server:latest
+            pull_policy: never
+        COMPOSE_OVERRIDE
+
+        docker compose \
+          -p hg-ci-precheck \
+          -f docker/docker-compose.yml \
+          -f /tmp/docker-compose.ci.override.yml \
+          up -d
+
+        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml ps
+
+    - name: Verify integration endpoints
+      run: |
+        wait_for_http() {
+          local url="$1"
+          local retries="${2:-40}"
+          local sleep_secs="${3:-5}"
+
+          for _ in $(seq 1 "$retries"); do
+            if curl -fsS "$url" >/dev/null; then
+              echo "Ready: $url"
+              return 0
+            fi
+            sleep "$sleep_secs"
+          done
+
+          echo "Timeout waiting for: $url"
+          return 1
+        }
+
+        wait_for_http "http://127.0.0.1:8620/v1/health"
+        wait_for_http "http://127.0.0.1:8520/v1/health"
+        wait_for_http "http://127.0.0.1:8080/versions"
+
+    - name: Dump compose logs on failure
+      if: ${{ failure() }}
+      run: |
+        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
+
+    - name: Stop compose stack
+      if: ${{ always() }}
+      run: |
+        docker compose \
+          -p hg-ci-precheck \
+          -f docker/docker-compose.yml \
+          -f /tmp/docker-compose.ci.override.yml \
+          down -v --remove-orphans || true
+
+    - name: Post-check disk usage
+      if: ${{ always() }}
+      run: |
+        docker system df || true
+        df -h
+
+    - name: Post-check cleanup
+      if: ${{ always() }}
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
+
+  publish_matrix:
+    needs: integration_precheck
+    if: ${{ needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: pd
+            image_url: hugegraph/pd:latest
+            dockerfile: ./hugegraph-pd/Dockerfile
+            container_port: 8620
+            host_port: 18620
+            probe_path: /v1/health
+          - module: store
+            image_url: hugegraph/store:latest
+            dockerfile: ./hugegraph-store/Dockerfile
+            container_port: 8520
+            host_port: 18520
+            probe_path: /v1/health
+          - module: server
+            image_url: hugegraph/server:latest
+            dockerfile: ./hugegraph-server/Dockerfile-hstore
+            container_port: 8080
+            host_port: 18080
+            probe_path: /versions
+
+    env:
+      REPOSITORY_URL: apache/hugegraph
+      BRANCH: master
+      MVN_ARGS: ${{ github.event.inputs.mvn_args || '' }}
+
+    steps:
     - name: Checkout latest
       uses: actions/checkout@v4
       with:
@@ -43,85 +197,88 @@ jobs:
         ref: ${{ env.BRANCH }}
         fetch-depth: 2
 
-    - name: Build x86 PD Image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./hugegraph-pd/Dockerfile
-        load: true
-        tags: ${{ env.PD_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
-    - name: Build x86 Store Image
-      uses: docker/build-push-action@v5
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
       with:
-        context: .
-        file: ./hugegraph-store/Dockerfile
-        load: true
-        tags: ${{ env.STORE_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-    - name: Build x86 Server Image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./hugegraph-server/Dockerfile-hstore
-        load: true
-        tags: ${{ env.SERVER_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
-
-    - name: Test x86 Images
+    - name: Pre-build disk usage (${{ matrix.module }})
       run: |
-        docker images
-        docker run -itd --name=pd --network host $PD_IMAGE_URL
-        sleep 10s
-        curl 0.0.0.0:8620 || exit
-        docker run -itd --name=store --network host $STORE_IMAGE_URL
-        sleep 10s
-        curl 0.0.0.0:8520 || exit
-        docker run -itd --name=server --network host $SERVER_IMAGE_URL
-        sleep 10s
-        curl 0.0.0.0:8080 || exit
-        docker ps -a
+        df -h
+        docker system df || true
 
-    - name: Push x86 & ARM PD Images
+    - name: Pre-build cleanup (${{ matrix.module }})
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
+
+    - name: Build x86 image for self-check (${{ matrix.module }})
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./hugegraph-pd/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ env.PD_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
+        file: ${{ matrix.dockerfile }}
+        load: true
+        tags: ${{ matrix.image_url }}
+        cache-from: type=gha,scope=latest-${{ matrix.module }}
+        cache-to: type=gha,scope=latest-${{ matrix.module }},mode=min
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Push x86 & ARM Store Images
+    - name: Self-check x86 image (${{ matrix.module }})
+      env:
+        IMAGE_URL: ${{ matrix.image_url }}
+        CONTAINER_PORT: ${{ matrix.container_port }}
+        HOST_PORT: ${{ matrix.host_port }}
+        PROBE_PATH: ${{ matrix.probe_path }}
+      run: |
+        container_name="hg-ci-${{ matrix.module }}"
+        docker rm -f "$container_name" >/dev/null 2>&1 || true
+
+        docker run -d \
+          --name "$container_name" \
+          -p "$HOST_PORT:$CONTAINER_PORT" \
+          "$IMAGE_URL"
+
+        for _ in $(seq 1 30); do
+          if curl -fsS "http://127.0.0.1:$HOST_PORT$PROBE_PATH" >/dev/null; then
+            echo "Self-check passed: http://127.0.0.1:$HOST_PORT$PROBE_PATH"
+            exit 0
+          fi
+          sleep 5
+        done
+
+        echo "Self-check failed: http://127.0.0.1:$HOST_PORT$PROBE_PATH"
+        docker logs "$container_name" || true
+        exit 1
+
+    - name: Stop self-check container (${{ matrix.module }})
+      if: ${{ always() }}
+      run: |
+        docker rm -f "hg-ci-${{ matrix.module }}" >/dev/null 2>&1 || true
+
+    - name: Build and push multi-arch image (${{ matrix.module }})
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./hugegraph-store/Dockerfile
+        file: ${{ matrix.dockerfile }}
         platforms: linux/amd64,linux/arm64
         push: true
-        tags: ${{ env.STORE_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
+        tags: ${{ matrix.image_url }}
+        cache-from: type=gha,scope=latest-${{ matrix.module }}
+        cache-to: type=gha,scope=latest-${{ matrix.module }},mode=min
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Push x86 & ARM Server Images
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./hugegraph-server/Dockerfile-hstore
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ env.SERVER_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
+    - name: Post-build disk usage (${{ matrix.module }})
+      if: ${{ always() }}
+      run: |
+        docker system df || true
+        df -h
+
+    - name: Post-build cleanup (${{ matrix.module }})
+      if: ${{ always() }}
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
