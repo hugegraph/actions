@@ -13,13 +13,33 @@ on:
         default: true
         description: 'whether integration precheck is mandatory before publish'
 
+concurrency:
+  group: publish-latest-pd-store-server
+  cancel-in-progress: false
+
 jobs:
+  resolve_source:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+    steps:
+    - name: Resolve source SHA
+      id: resolve
+      run: |
+        source_sha="$(git ls-remote https://github.com/apache/hugegraph.git refs/heads/master | awk '{print $1}')"
+        if [ -z "$source_sha" ]; then
+          echo "Failed to resolve source SHA for apache/hugegraph master"
+          exit 1
+        fi
+        echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
   integration_precheck:
+    needs: resolve_source
     if: ${{ github.event.inputs.strict_mode == 'true' }}
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: apache/hugegraph
-      BRANCH: master
+      SOURCE_SHA: ${{ needs.resolve_source.outputs.source_sha }}
       PD_IMAGE_URL: hugegraph/pd:latest
       STORE_IMAGE_URL: hugegraph/store:latest
       SERVER_IMAGE_URL: hugegraph/server:latest
@@ -30,7 +50,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: ${{ env.REPOSITORY_URL }}
-        ref: ${{ env.BRANCH }}
+        ref: ${{ env.SOURCE_SHA }}
         fetch-depth: 2
 
     - name: Set up Docker Buildx
@@ -89,16 +109,16 @@ jobs:
 
     - name: Start compose stack with local images
       run: |
-        cat > /tmp/docker-compose.ci.override.yml <<'COMPOSE_OVERRIDE'
+        cat > /tmp/docker-compose.ci.override.yml <<COMPOSE_OVERRIDE
         services:
           pd:
-            image: hugegraph/pd:latest
+            image: ${PD_IMAGE_URL}
             pull_policy: never
           store:
-            image: hugegraph/store:latest
+            image: ${STORE_IMAGE_URL}
             pull_policy: never
           server:
-            image: hugegraph/server:latest
+            image: ${SERVER_IMAGE_URL}
             pull_policy: never
         COMPOSE_OVERRIDE
 
@@ -118,7 +138,7 @@ jobs:
           local sleep_secs="${3:-5}"
 
           for _ in $(seq 1 "$retries"); do
-            if curl -fsS "$url" >/dev/null; then
+            if curl -fsS --connect-timeout 3 --max-time 8 "$url" >/dev/null; then
               echo "Ready: $url"
               return 0
             fi
@@ -160,8 +180,8 @@ jobs:
         docker builder prune -af || true
 
   publish_matrix:
-    needs: integration_precheck
-    if: ${{ needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped' }}
+    needs: [resolve_source, integration_precheck]
+    if: ${{ needs.resolve_source.result == 'success' && (needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -188,7 +208,7 @@ jobs:
 
     env:
       REPOSITORY_URL: apache/hugegraph
-      BRANCH: master
+      SOURCE_SHA: ${{ needs.resolve_source.outputs.source_sha }}
       MVN_ARGS: ${{ github.event.inputs.mvn_args || '' }}
 
     steps:
@@ -196,7 +216,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: ${{ env.REPOSITORY_URL }}
-        ref: ${{ env.BRANCH }}
+        ref: ${{ env.SOURCE_SHA }}
         fetch-depth: 2
 
     - name: Set up QEMU
@@ -250,7 +270,7 @@ jobs:
           "$IMAGE_URL"
 
         for _ in $(seq 1 30); do
-          if curl -fsS "http://127.0.0.1:$HOST_PORT$PROBE_PATH" >/dev/null; then
+          if curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:$HOST_PORT$PROBE_PATH" >/dev/null; then
             echo "Self-check passed: http://127.0.0.1:$HOST_PORT$PROBE_PATH"
             exit 0
           fi
