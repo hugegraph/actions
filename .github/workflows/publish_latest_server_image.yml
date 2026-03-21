@@ -39,5 +39,4 @@ jobs:
       last_hash_name: LAST_SERVER_HASH
       hash_repo_owner: hugegraph
       hash_repo_name: actions
-      no_update_pull_image: hugegraph/hugegraph
     secrets: inherit
