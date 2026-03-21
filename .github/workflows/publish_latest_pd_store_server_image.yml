@@ -7,121 +7,339 @@ on:
         required: false
         default: ''
         description: 'mvn build args, like "MAVEN_ARGS=-P stage"'
- 
+      strict_mode:
+        type: boolean
+        required: false
+        default: true
+        description: 'whether integration precheck is mandatory before publish'
+      wait_timeout_sec:
+        required: false
+        default: '300'
+        description: 'docker compose wait timeout in seconds for precheck/self-check'
+
+concurrency:
+  group: publish-latest-pd-store-server
+  cancel-in-progress: false
+
 jobs:
-  build_latest:
+  resolve_source:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+    steps:
+    - name: Resolve source SHA
+      id: resolve
+      run: |
+        source_sha="$(git ls-remote https://github.com/apache/hugegraph.git refs/heads/master | awk '{print $1}')"
+        if [ -z "$source_sha" ]; then
+          echo "Failed to resolve source SHA for apache/hugegraph master"
+          exit 1
+        fi
+        echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+  integration_precheck:
+    needs: resolve_source
+    if: ${{ inputs.strict_mode }}
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: apache/hugegraph
-      BRANCH: master
+      SOURCE_SHA: ${{ needs.resolve_source.outputs.source_sha }}
       PD_IMAGE_URL: hugegraph/pd:latest
       STORE_IMAGE_URL: hugegraph/store:latest
       SERVER_IMAGE_URL: hugegraph/server:latest
-      MVN_ARGS: ${{inputs.mvn_args}}
+      MVN_ARGS: ${{ github.event.inputs.mvn_args || '' }}
+      WAIT_TIMEOUT_SEC: ${{ github.event.inputs.wait_timeout_sec || '300' }}
 
     steps:
-    # - name: Maximize Build Space
-    #   uses: easimon/maximize-build-space@master
-    #   with:
-    #     root-reserve-mb: 512
-    #     swap-size-mb: 1024
-    #     remove-dotnet: 'true'
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+    - name: Validate wait timeout
+      run: |
+        if ! [[ "$WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$WAIT_TIMEOUT_SEC" -lt 30 ] || [ "$WAIT_TIMEOUT_SEC" -gt 1800 ]; then
+          echo "Invalid wait_timeout_sec: $WAIT_TIMEOUT_SEC. Expected integer between 30 and 1800."
+          exit 1
+        fi
 
     - name: Checkout latest
       uses: actions/checkout@v4
       with:
         repository: ${{ env.REPOSITORY_URL }}
-        ref: ${{ env.BRANCH }}
+        ref: ${{ env.SOURCE_SHA }}
         fetch-depth: 2
 
-    - name: Build x86 PD Image
-      uses: docker/build-push-action@v5
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
       with:
-        context: .
-        file: ./hugegraph-pd/Dockerfile
-        load: true
-        tags: ${{ env.PD_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
+        version: latest
 
-    - name: Build x86 Store Image
-      uses: docker/build-push-action@v5
+    - name: Login to Docker Hub
+      uses: docker/login-action@v4
       with:
-        context: .
-        file: ./hugegraph-store/Dockerfile
-        load: true
-        tags: ${{ env.STORE_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-    - name: Build x86 Server Image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./hugegraph-server/Dockerfile-hstore
-        load: true
-        tags: ${{ env.SERVER_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
-
-    - name: Test x86 Images
+    - name: Pre-build disk usage
       run: |
-        docker images
-        docker run -itd --name=pd --network host $PD_IMAGE_URL
-        sleep 10s
-        curl 0.0.0.0:8620 || exit
-        docker run -itd --name=store --network host $STORE_IMAGE_URL
-        sleep 10s
-        curl 0.0.0.0:8520 || exit
-        docker run -itd --name=server --network host $SERVER_IMAGE_URL
-        sleep 10s
-        curl 0.0.0.0:8080 || exit
-        docker ps -a
+        df -h
+        docker system df || true
 
-    - name: Push x86 & ARM PD Images
-      uses: docker/build-push-action@v5
+    - name: Pre-build cleanup
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
+
+    - name: Build x86 PD image for integration check
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: ./hugegraph-pd/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        push: true
+        load: true
         tags: ${{ env.PD_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
+        cache-from: type=gha,scope=latest-pd
+        cache-to: type=gha,scope=latest-pd,mode=min
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Push x86 & ARM Store Images
-      uses: docker/build-push-action@v5
+    - name: Build x86 Store image for integration check
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: ./hugegraph-store/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        push: true
+        load: true
         tags: ${{ env.STORE_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
+        cache-from: type=gha,scope=latest-store
+        cache-to: type=gha,scope=latest-store,mode=min
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Push x86 & ARM Server Images
-      uses: docker/build-push-action@v5
+    - name: Build x86 Server image for integration check
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: ./hugegraph-server/Dockerfile-hstore
+        load: true
+        tags: ${{ env.SERVER_IMAGE_URL }}
+        cache-from: type=gha,scope=latest-server
+        cache-to: type=gha,scope=latest-server,mode=min
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Start compose stack with local images
+      run: |
+        if [ ! -f "docker/docker-compose.yml" ]; then
+          echo "ERROR: docker/docker-compose.yml not found in $REPOSITORY_URL@$SOURCE_SHA"
+          echo "Please update the compose file path in this workflow."
+          exit 1
+        fi
+
+        cat > /tmp/docker-compose.ci.override.yml <<COMPOSE_OVERRIDE
+        services:
+          pd:
+            image: ${PD_IMAGE_URL}
+            pull_policy: never
+          store:
+            image: ${STORE_IMAGE_URL}
+            pull_policy: never
+          server:
+            image: ${SERVER_IMAGE_URL}
+            pull_policy: never
+        COMPOSE_OVERRIDE
+
+        docker compose \
+          -p hg-ci-precheck \
+          -f docker/docker-compose.yml \
+          -f /tmp/docker-compose.ci.override.yml \
+          up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
+
+        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml ps
+
+    - name: Verify integration endpoints
+      run: |
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8620/v1/health" >/dev/null
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8520/v1/health" >/dev/null
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8080/versions" >/dev/null
+
+    - name: Dump compose logs on failure
+      if: ${{ failure() }}
+      run: |
+        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
+
+    - name: Stop compose stack
+      if: ${{ always() }}
+      run: |
+        docker compose \
+          -p hg-ci-precheck \
+          -f docker/docker-compose.yml \
+          -f /tmp/docker-compose.ci.override.yml \
+          down -v --remove-orphans || true
+
+    - name: Post-check disk usage
+      if: ${{ always() }}
+      run: |
+        docker system df || true
+        df -h
+
+    - name: Post-check cleanup
+      if: ${{ always() }}
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
+
+  publish_matrix:
+    needs: [resolve_source, integration_precheck]
+    if: ${{ always() && needs.resolve_source.result == 'success' && (needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: pd
+            image_url: hugegraph/pd:latest
+            dockerfile: ./hugegraph-pd/Dockerfile
+            host_port: 8620
+            probe_path: /v1/health
+            skip_selfcheck: false
+          - module: store
+            image_url: hugegraph/store:latest
+            dockerfile: ./hugegraph-store/Dockerfile
+            host_port: 8520
+            probe_path: /v1/health
+            skip_selfcheck: true
+          - module: server
+            image_url: hugegraph/server:latest
+            dockerfile: ./hugegraph-server/Dockerfile-hstore
+            host_port: 8080
+            probe_path: /versions
+            skip_selfcheck: true
+
+    env:
+      REPOSITORY_URL: apache/hugegraph
+      SOURCE_SHA: ${{ needs.resolve_source.outputs.source_sha }}
+      MVN_ARGS: ${{ github.event.inputs.mvn_args || '' }}
+      WAIT_TIMEOUT_SEC: ${{ github.event.inputs.wait_timeout_sec || '300' }}
+
+    steps:
+    - name: Validate wait timeout (${{ matrix.module }})
+      run: |
+        if ! [[ "$WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$WAIT_TIMEOUT_SEC" -lt 30 ] || [ "$WAIT_TIMEOUT_SEC" -gt 1800 ]; then
+          echo "Invalid wait_timeout_sec: $WAIT_TIMEOUT_SEC. Expected integer between 30 and 1800."
+          exit 1
+        fi
+
+    - name: Checkout latest
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.REPOSITORY_URL }}
+        ref: ${{ env.SOURCE_SHA }}
+        fetch-depth: 2
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+      with:
+        version: latest
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v4
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Pre-build disk usage (${{ matrix.module }})
+      run: |
+        df -h
+        docker system df || true
+
+    - name: Pre-build cleanup (${{ matrix.module }})
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
+
+    - name: Build x86 image for self-check (${{ matrix.module }})
+      if: ${{ !matrix.skip_selfcheck }}
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ${{ matrix.dockerfile }}
+        load: true
+        tags: ${{ matrix.image_url }}
+        cache-from: type=gha,scope=latest-${{ matrix.module }}
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Self-check x86 image (${{ matrix.module }})
+      if: ${{ !matrix.skip_selfcheck }}
+      env:
+        MODULE: ${{ matrix.module }}
+        IMAGE_URL: ${{ matrix.image_url }}
+        HOST_PORT: ${{ matrix.host_port }}
+        PROBE_PATH: ${{ matrix.probe_path }}
+      run: |
+        compose_project="hg-ci-selfcheck-${MODULE}"
+        compose_override="/tmp/docker-compose.self-check-${MODULE}.yml"
+
+        if [ ! -f "docker/docker-compose.yml" ]; then
+          echo "ERROR: docker/docker-compose.yml not found in $REPOSITORY_URL@$SOURCE_SHA"
+          echo "Please update the compose file path in this workflow."
+          exit 1
+        fi
+
+        cat > "$compose_override" <<COMPOSE_OVERRIDE
+        services:
+          ${MODULE}:
+            image: ${IMAGE_URL}
+            pull_policy: never
+        COMPOSE_OVERRIDE
+
+        docker compose \
+          -p "$compose_project" \
+          -f docker/docker-compose.yml \
+          -f "$compose_override" \
+          up -d "$MODULE" --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
+
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:$HOST_PORT$PROBE_PATH" >/dev/null
+        echo "Self-check passed: http://127.0.0.1:$HOST_PORT$PROBE_PATH"
+
+    - name: Dump self-check compose logs on failure (${{ matrix.module }})
+      if: ${{ failure() && !matrix.skip_selfcheck }}
+      env:
+        MODULE: ${{ matrix.module }}
+      run: |
+        compose_project="hg-ci-selfcheck-${MODULE}"
+        compose_override="/tmp/docker-compose.self-check-${MODULE}.yml"
+        docker compose -p "$compose_project" -f docker/docker-compose.yml -f "$compose_override" ps || true
+        docker compose -p "$compose_project" -f docker/docker-compose.yml -f "$compose_override" logs --no-color --tail=200 || true
+
+    - name: Stop self-check compose stack (${{ matrix.module }})
+      if: ${{ always() && !matrix.skip_selfcheck }}
+      env:
+        MODULE: ${{ matrix.module }}
+      run: |
+        compose_project="hg-ci-selfcheck-${MODULE}"
+        compose_override="/tmp/docker-compose.self-check-${MODULE}.yml"
+        docker compose \
+          -p "$compose_project" \
+          -f docker/docker-compose.yml \
+          -f "$compose_override" \
+          down -v --remove-orphans || true
+        rm -f "$compose_override"
+
+    - name: Build and push multi-arch image (${{ matrix.module }})
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ${{ matrix.dockerfile }}
         platforms: linux/amd64,linux/arm64
         push: true
-        tags: ${{ env.SERVER_IMAGE_URL }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
+        tags: ${{ matrix.image_url }}
+        cache-from: type=gha,scope=latest-${{ matrix.module }}
+        cache-to: type=gha,scope=latest-${{ matrix.module }},mode=max
         build-args: ${{ env.MVN_ARGS }}
+
+    - name: Post-build disk usage (${{ matrix.module }})
+      if: ${{ always() }}
+      run: |
+        docker system df || true
+        df -h
+
+    - name: Post-build cleanup (${{ matrix.module }})
+      if: ${{ always() }}
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
