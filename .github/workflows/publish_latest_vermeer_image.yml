@@ -20,7 +20,7 @@ jobs:
             "context": "./vermeer",
             "dockerfile": "./vermeer/Dockerfile",
             "image_repo_latest": "hugegraph/vermeer",
-            "image_repo_release": "apache/vermeer",
+            "image_repo_release": "hugegraph/vermeer",
             "platforms_latest": "linux/amd64,linux/arm64",
             "platforms_release": "linux/amd64,linux/arm64",
             "smoke_test": false
