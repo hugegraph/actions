@@ -126,32 +126,15 @@ jobs:
           -p hg-ci-precheck \
           -f docker/docker-compose.yml \
           -f /tmp/docker-compose.ci.override.yml \
-          up -d
+          up -d --wait --wait-timeout 300
 
         docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml ps
 
     - name: Verify integration endpoints
       run: |
-        wait_for_http() {
-          local url="$1"
-          local retries="${2:-40}"
-          local sleep_secs="${3:-5}"
-
-          for _ in $(seq 1 "$retries"); do
-            if curl -fsS --connect-timeout 3 --max-time 8 "$url" >/dev/null; then
-              echo "Ready: $url"
-              return 0
-            fi
-            sleep "$sleep_secs"
-          done
-
-          echo "Timeout waiting for: $url"
-          return 1
-        }
-
-        wait_for_http "http://127.0.0.1:8620/v1/health"
-        wait_for_http "http://127.0.0.1:8520/v1/health"
-        wait_for_http "http://127.0.0.1:8080/versions"
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8620/v1/health" >/dev/null
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8520/v1/health" >/dev/null
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8080/versions" >/dev/null
 
     - name: Dump compose logs on failure
       if: ${{ failure() }}
@@ -256,35 +239,53 @@ jobs:
 
     - name: Self-check x86 image (${{ matrix.module }})
       env:
+        MODULE: ${{ matrix.module }}
         IMAGE_URL: ${{ matrix.image_url }}
-        CONTAINER_PORT: ${{ matrix.container_port }}
         HOST_PORT: ${{ matrix.host_port }}
         PROBE_PATH: ${{ matrix.probe_path }}
       run: |
-        container_name="hg-ci-${{ matrix.module }}"
-        docker rm -f "$container_name" >/dev/null 2>&1 || true
+        compose_project="hg-ci-selfcheck-${MODULE}"
+        compose_override="/tmp/docker-compose.self-check-${MODULE}.yml"
 
-        docker run -d \
-          --name "$container_name" \
-          -p "$HOST_PORT:$CONTAINER_PORT" \
-          "$IMAGE_URL"
+        cat > "$compose_override" <<COMPOSE_OVERRIDE
+        services:
+          ${MODULE}:
+            image: ${IMAGE_URL}
+            pull_policy: never
+        COMPOSE_OVERRIDE
 
-        for _ in $(seq 1 30); do
-          if curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:$HOST_PORT$PROBE_PATH" >/dev/null; then
-            echo "Self-check passed: http://127.0.0.1:$HOST_PORT$PROBE_PATH"
-            exit 0
-          fi
-          sleep 5
-        done
+        docker compose \
+          -p "$compose_project" \
+          -f docker/docker-compose.yml \
+          -f "$compose_override" \
+          up -d "$MODULE" --wait --wait-timeout 300
 
-        echo "Self-check failed: http://127.0.0.1:$HOST_PORT$PROBE_PATH"
-        docker logs "$container_name" || true
-        exit 1
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:$HOST_PORT$PROBE_PATH" >/dev/null
+        echo "Self-check passed: http://127.0.0.1:$HOST_PORT$PROBE_PATH"
 
-    - name: Stop self-check container (${{ matrix.module }})
-      if: ${{ always() }}
+    - name: Dump self-check compose logs on failure (${{ matrix.module }})
+      if: ${{ failure() }}
+      env:
+        MODULE: ${{ matrix.module }}
       run: |
-        docker rm -f "hg-ci-${{ matrix.module }}" >/dev/null 2>&1 || true
+        compose_project="hg-ci-selfcheck-${MODULE}"
+        compose_override="/tmp/docker-compose.self-check-${MODULE}.yml"
+        docker compose -p "$compose_project" -f docker/docker-compose.yml -f "$compose_override" ps || true
+        docker compose -p "$compose_project" -f docker/docker-compose.yml -f "$compose_override" logs --no-color --tail=200 || true
+
+    - name: Stop self-check compose stack (${{ matrix.module }})
+      if: ${{ always() }}
+      env:
+        MODULE: ${{ matrix.module }}
+      run: |
+        compose_project="hg-ci-selfcheck-${MODULE}"
+        compose_override="/tmp/docker-compose.self-check-${MODULE}.yml"
+        docker compose \
+          -p "$compose_project" \
+          -f docker/docker-compose.yml \
+          -f "$compose_override" \
+          down -v --remove-orphans || true
+        rm -f "$compose_override"
 
     - name: Build and push multi-arch image (${{ matrix.module }})
       uses: docker/build-push-action@v7
