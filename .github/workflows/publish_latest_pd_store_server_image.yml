@@ -121,6 +121,12 @@ jobs:
 
     - name: Start compose stack with local images
       run: |
+        if [ ! -f "docker/docker-compose.yml" ]; then
+          echo "ERROR: docker/docker-compose.yml not found in $REPOSITORY_URL@$SOURCE_SHA"
+          echo "Please update the compose file path in this workflow."
+          exit 1
+        fi
+
         cat > /tmp/docker-compose.ci.override.yml <<COMPOSE_OVERRIDE
         services:
           pd:
@@ -254,7 +260,6 @@ jobs:
         load: true
         tags: ${{ matrix.image_url }}
         cache-from: type=gha,scope=latest-${{ matrix.module }}
-        cache-to: type=gha,scope=latest-${{ matrix.module }},mode=min
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Self-check x86 image (${{ matrix.module }})
@@ -266,6 +271,12 @@ jobs:
       run: |
         compose_project="hg-ci-selfcheck-${MODULE}"
         compose_override="/tmp/docker-compose.self-check-${MODULE}.yml"
+
+        if [ ! -f "docker/docker-compose.yml" ]; then
+          echo "ERROR: docker/docker-compose.yml not found in $REPOSITORY_URL@$SOURCE_SHA"
+          echo "Please update the compose file path in this workflow."
+          exit 1
+        fi
 
         cat > "$compose_override" <<COMPOSE_OVERRIDE
         services:
