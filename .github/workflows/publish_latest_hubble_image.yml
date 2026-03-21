@@ -7,7 +7,7 @@ on:
     inputs:
       mvn_args:
         required: false
-        default: 'MAVEN_ARGS=-P stage'
+        default: ''
         description: 'mvn build args, like "MAVEN_ARGS=-P stage"'
 
 jobs:
@@ -32,7 +32,7 @@ jobs:
           }
         ]
       use_mvn_args: true
-      mvn_args: ${{ github.event.inputs.mvn_args || 'MAVEN_ARGS=-P stage' }}
+      mvn_args: ${{ github.event.inputs.mvn_args || '' }}
       enable_hash_gate: true
       last_hash_value: ${{ vars.LAST_HUBBLE_HASH }}
       last_hash_name: LAST_HUBBLE_HASH
