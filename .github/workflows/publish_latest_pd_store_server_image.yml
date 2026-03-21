@@ -35,7 +35,7 @@ jobs:
 
   integration_precheck:
     needs: resolve_source
-    if: ${{ github.event.inputs.strict_mode == 'true' }}
+    if: ${{ inputs.strict_mode }}
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: apache/hugegraph
