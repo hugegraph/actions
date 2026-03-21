@@ -7,7 +7,7 @@ on:
     inputs:
       repository_url:
         required: true
-        default: 'apache/incubator-hugegraph-toolchain'
+        default: 'apache/hugegraph-toolchain'
       repository_branch:
         required: true
         default: 'master'

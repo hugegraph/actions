@@ -7,73 +7,35 @@ on:
     inputs:
       mvn_args:
         required: false
-        default: 'MAVEN_ARGS=-P stage'
+        default: ''
         description: 'mvn build args, like "MAVEN_ARGS=-P stage"'
-      
+
 jobs:
-  build_latest:
-    runs-on: ubuntu-latest
-    env:
-      REPOSITORY_URL: apache/hugegraph-toolchain
-      BRANCH: master
-      IMAGE_URL: hugegraph/loader:latest
-      GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-      OWNER: hugegraph
-      REPO: actions
-      LAST_LOADER_HASH: ${{vars.LAST_LOADER_HASH}}
-      MVN_ARGS: ${{ github.event.inputs.mvn_args || 'MAVEN_ARGS=-P stage' }}
-
-    steps:
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Checkout latest
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ env.REPOSITORY_URL }}
-        ref: ${{ env.BRANCH }}
-        fetch-depth: 2
-
-    - name: Get current commit-hash
-      run: |
-        current_commit_hash=$(git rev-parse HEAD)
-        echo "CURRENT_COMMIT_HASH=$current_commit_hash" >> $GITHUB_ENV
-
-    - name: Check if an update is needed
-      run: |
-        need_update='false'
-        if [[ "$CURRENT_COMMIT_HASH" != "$LAST_LOADER_HASH" ]]; then
-          need_update='true'
-        fi
-        echo "NEED_UPDATE=$need_update" >> $GITHUB_ENV
-        # TODO: replace `if` statements for exit if github provide support for exit gracefully,
-        # see https://github.com/actions/runner/issues/662 for more details
-
-    - name: Build X86 & ARM And Push All
-      uses: docker/build-push-action@v5
-      if: ${{ env.NEED_UPDATE == 'true' }}
-      with:
-        context: .
-        file: ./hugegraph-loader/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        tags: ${{ env.IMAGE_URL }}
-        push: true
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
-
-    - name: Updata last commit-hash
-      if: ${{ env.NEED_UPDATE == 'true' }}
-      run: |
-        curl -L -X PATCH \
-        -H "Accept: application/vnd.github+json" \
-        -H "X-GitHub-Api-Version: 2022-11-28" \
-        -H "Authorization: Bearer $GITHUB_TOKEN" \
-        https://api.github.com/repos/$OWNER/$REPO/actions/variables/LAST_LOADER_HASH \
-        -d '{"name":"LAST_LOADER_HASH","value":"'"$CURRENT_COMMIT_HASH"'"}'
+  publish:
+    uses: ./.github/workflows/_publish_image_reusable.yml
+    with:
+      mode: latest
+      component: loader
+      repository_url: apache/hugegraph-toolchain
+      branch: master
+      build_matrix_json: |
+        [
+          {
+            "module": "loader",
+            "context": ".",
+            "dockerfile": "./hugegraph-loader/Dockerfile",
+            "image_repo_latest": "hugegraph/loader",
+            "image_repo_release": "hugegraph/loader",
+            "platforms_latest": "linux/amd64,linux/arm64",
+            "platforms_release": "linux/amd64,linux/arm64",
+            "smoke_test": false
+          }
+        ]
+      use_mvn_args: true
+      mvn_args: ${{ github.event.inputs.mvn_args || '' }}
+      enable_hash_gate: true
+      last_hash_value: ${{ vars.LAST_LOADER_HASH }}
+      last_hash_name: LAST_LOADER_HASH
+      hash_repo_owner: hugegraph
+      hash_repo_name: actions
+    secrets: inherit

@@ -9,97 +9,34 @@ on:
         required: false
         default: ''
         description: 'mvn build args, like "MAVEN_ARGS=-P stage"'
-      
+
 jobs:
-  build_latest:
-    runs-on: ubuntu-latest
-    env:
-      REPOSITORY_URL: apache/hugegraph
-      BRANCH: master
-      IMAGE_URL: hugegraph/hugegraph:latest
-      GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-      OWNER: hugegraph
-      REPO: actions
-      LAST_SERVER_HASH: ${{vars.LAST_SERVER_HASH}}
-      MVN_ARGS: ${{ github.event.inputs.mvn_args || 'MAVEN_ARGS=-P stage' }}
-
-    steps:
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Checkout latest
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ env.REPOSITORY_URL }}
-        ref: ${{ env.BRANCH }}
-        fetch-depth: 2
-
-    - name: Get current commit-hash
-      run: |
-        current_commit_hash=$(git rev-parse HEAD)
-        echo "CURRENT_COMMIT_HASH=$current_commit_hash" >> $GITHUB_ENV
-
-    - name: Check if an update is needed
-      run: |
-        need_update='false'
-        if [[ "$CURRENT_COMMIT_HASH" != "$LAST_SERVER_HASH" ]]; then
-          need_update='true'
-        else
-          docker pull hugegraph/hugegraph
-        fi
-        echo "NEED_UPDATE=$need_update" >> $GITHUB_ENV
-        # TODO: replace `if` statements for exit if github provide support for exit gracefully,
-        # see https://github.com/actions/runner/issues/662 for more details
-
-    - name: Build X86 Image
-      if: ${{ env.NEED_UPDATE == 'true' }}
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./hugegraph-server/Dockerfile
-        load: true
-        tags: ${{ env.IMAGE_URL }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
-
-    - name: Test X86 Image
-      if: ${{ env.NEED_UPDATE == 'true' }}
-      run: |
-        docker images
-        docker run -itd --name=graph -p 18080:8080 $IMAGE_URL
-        sleep 20s
-        curl 0.0.0.0:18080 || exit
-        docker ps -a
-        sleep 20s
-        curl 0.0.0.0:18080 || exit
-        docker ps -a
-
-    - name: Build ARM & Push all
-      if: ${{ env.NEED_UPDATE == 'true' }}
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./hugegraph-server/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ env.IMAGE_URL }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        build-args: ${{ env.MVN_ARGS }}
-
-    - name: Updata last commit-hash
-      if: ${{ env.NEED_UPDATE == 'true' }}
-      run: |
-        curl -L -X PATCH \
-        -H "Accept: application/vnd.github+json" \
-        -H "X-GitHub-Api-Version: 2022-11-28" \
-        -H "Authorization: Bearer $GITHUB_TOKEN" \
-        https://api.github.com/repos/$OWNER/$REPO/actions/variables/LAST_SERVER_HASH \
-        -d '{"name":"LAST_SERVER_HASH","value":"'"$CURRENT_COMMIT_HASH"'"}'
+  publish:
+    uses: ./.github/workflows/_publish_image_reusable.yml
+    with:
+      mode: latest
+      component: server
+      repository_url: apache/hugegraph
+      branch: master
+      build_matrix_json: |
+        [
+          {
+            "module": "server",
+            "context": ".",
+            "dockerfile": "./hugegraph-server/Dockerfile",
+            "image_repo_latest": "hugegraph/hugegraph",
+            "image_repo_release": "hugegraph/hugegraph",
+            "platforms_latest": "linux/amd64,linux/arm64",
+            "platforms_release": "linux/amd64,linux/arm64",
+            "smoke_test": true,
+            "smoke_test_cmd": "docker rm -f graph >/dev/null 2>&1 || true; docker run -itd --name=graph -p 18080:8080 $IMAGE_URL; sleep 20s; curl -fsS http://127.0.0.1:18080 >/dev/null || exit 1; docker ps -a; sleep 20s; curl -fsS http://127.0.0.1:18080 >/dev/null || exit 1; docker ps -a"
+          }
+        ]
+      use_mvn_args: true
+      mvn_args: ${{ github.event.inputs.mvn_args || '' }}
+      enable_hash_gate: true
+      last_hash_value: ${{ vars.LAST_SERVER_HASH }}
+      last_hash_name: LAST_SERVER_HASH
+      hash_repo_owner: hugegraph
+      hash_repo_name: actions
+    secrets: inherit
