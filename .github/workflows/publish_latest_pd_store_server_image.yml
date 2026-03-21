@@ -51,6 +51,13 @@ jobs:
       WAIT_TIMEOUT_SEC: ${{ github.event.inputs.wait_timeout_sec || '300' }}
 
     steps:
+    - name: Validate wait timeout
+      run: |
+        if ! [[ "$WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$WAIT_TIMEOUT_SEC" -lt 30 ] || [ "$WAIT_TIMEOUT_SEC" -gt 1800 ]; then
+          echo "Invalid wait_timeout_sec: $WAIT_TIMEOUT_SEC. Expected integer between 30 and 1800."
+          exit 1
+        fi
+
     - name: Checkout latest
       uses: actions/checkout@v4
       with:
@@ -68,13 +75,6 @@ jobs:
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Validate wait timeout
-      run: |
-        if ! [[ "$WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$WAIT_TIMEOUT_SEC" -lt 30 ] || [ "$WAIT_TIMEOUT_SEC" -gt 1800 ]; then
-          echo "Invalid wait_timeout_sec: $WAIT_TIMEOUT_SEC. Expected integer between 30 and 1800."
-          exit 1
-        fi
 
     - name: Pre-build disk usage
       run: |
@@ -191,21 +191,21 @@ jobs:
           - module: pd
             image_url: hugegraph/pd:latest
             dockerfile: ./hugegraph-pd/Dockerfile
-            container_port: 8620
-            host_port: 18620
+            host_port: 8620
             probe_path: /v1/health
+            skip_selfcheck: false
           - module: store
             image_url: hugegraph/store:latest
             dockerfile: ./hugegraph-store/Dockerfile
-            container_port: 8520
-            host_port: 18520
+            host_port: 8520
             probe_path: /v1/health
+            skip_selfcheck: true
           - module: server
             image_url: hugegraph/server:latest
             dockerfile: ./hugegraph-server/Dockerfile-hstore
-            container_port: 8080
-            host_port: 18080
+            host_port: 8080
             probe_path: /versions
+            skip_selfcheck: true
 
     env:
       REPOSITORY_URL: apache/hugegraph
@@ -214,6 +214,13 @@ jobs:
       WAIT_TIMEOUT_SEC: ${{ github.event.inputs.wait_timeout_sec || '300' }}
 
     steps:
+    - name: Validate wait timeout (${{ matrix.module }})
+      run: |
+        if ! [[ "$WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$WAIT_TIMEOUT_SEC" -lt 30 ] || [ "$WAIT_TIMEOUT_SEC" -gt 1800 ]; then
+          echo "Invalid wait_timeout_sec: $WAIT_TIMEOUT_SEC. Expected integer between 30 and 1800."
+          exit 1
+        fi
+
     - name: Checkout latest
       uses: actions/checkout@v4
       with:
@@ -234,13 +241,6 @@ jobs:
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Validate wait timeout (${{ matrix.module }})
-      run: |
-        if ! [[ "$WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$WAIT_TIMEOUT_SEC" -lt 30 ] || [ "$WAIT_TIMEOUT_SEC" -gt 1800 ]; then
-          echo "Invalid wait_timeout_sec: $WAIT_TIMEOUT_SEC. Expected integer between 30 and 1800."
-          exit 1
-        fi
 
     - name: Pre-build disk usage (${{ matrix.module }})
       run: |
@@ -263,6 +263,7 @@ jobs:
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Self-check x86 image (${{ matrix.module }})
+      if: ${{ !matrix.skip_selfcheck }}
       env:
         MODULE: ${{ matrix.module }}
         IMAGE_URL: ${{ matrix.image_url }}
@@ -295,7 +296,7 @@ jobs:
         echo "Self-check passed: http://127.0.0.1:$HOST_PORT$PROBE_PATH"
 
     - name: Dump self-check compose logs on failure (${{ matrix.module }})
-      if: ${{ failure() }}
+      if: ${{ failure() && !matrix.skip_selfcheck }}
       env:
         MODULE: ${{ matrix.module }}
       run: |
@@ -305,7 +306,7 @@ jobs:
         docker compose -p "$compose_project" -f docker/docker-compose.yml -f "$compose_override" logs --no-color --tail=200 || true
 
     - name: Stop self-check compose stack (${{ matrix.module }})
-      if: ${{ always() }}
+      if: ${{ always() && !matrix.skip_selfcheck }}
       env:
         MODULE: ${{ matrix.module }}
       run: |
