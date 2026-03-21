@@ -181,7 +181,7 @@ jobs:
 
   publish_matrix:
     needs: [resolve_source, integration_precheck]
-    if: ${{ needs.resolve_source.result == 'success' && (needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped') }}
+    if: ${{ always() && needs.resolve_source.result == 'success' && (needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
