@@ -14,8 +14,11 @@ jobs:
     with:
       mode: release
       component: ai
-      repository_url: apache/incubator-hugegraph-ai
+      repository_url: apache/hugegraph-ai
       branch: ${{ inputs.branch }}
+      # IMPORTANT:
+      # - Keep ARM enabled for normal RAG image (Dockerfile.llm).
+      # - Keep rag-bin (Dockerfile.nk) on amd64 only due to arm incompatibility.
       build_matrix_json: |
         [
           {
@@ -34,8 +37,8 @@ jobs:
             "dockerfile": "./docker/Dockerfile.nk",
             "image_repo_latest": "hugegraph/rag-bin",
             "image_repo_release": "hugegraph/rag-bin",
-            "platforms_latest": "linux/amd64,linux/arm64",
-            "platforms_release": "linux/amd64,linux/arm64",
+            "platforms_latest": "linux/amd64",
+            "platforms_release": "linux/amd64",
             "smoke_test": false
           }
         ]

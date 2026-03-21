@@ -11,7 +11,7 @@ jobs:
     with:
       mode: latest
       component: vermeer
-      repository_url: apache/incubator-hugegraph-computer
+      repository_url: apache/hugegraph-computer
       branch: master
       build_matrix_json: |
         [
