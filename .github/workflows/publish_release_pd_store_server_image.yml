@@ -1,10 +1,12 @@
-name: "Publish pd-store-server image(latest)"
+name: "Publish pd-store-server image(release)"
 
 on:
-  schedule:
-    - cron: '0 23 * * *'
   workflow_dispatch:
     inputs:
+      branch:
+        required: true
+        default: ''
+        description: 'The branch name should be like *-x.x.x, for example release-1.0.0'
       mvn_args:
         required: false
         default: ''
@@ -20,22 +22,18 @@ on:
         description: 'docker compose wait timeout in seconds for precheck/self-check'
 
 concurrency:
-  group: publish-latest-pd-store-server
+  group: publish-release-pd-store-server
   cancel-in-progress: false
 
 jobs:
   publish:
     uses: ./.github/workflows/_publish_pd_store_server_reusable.yml
     with:
-      mode: latest
+      mode: release
       repository_url: apache/hugegraph
-      branch: master
-      mvn_args: ${{ github.event.inputs.mvn_args || '' }}
-      strict_mode: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.strict_mode != 'false' }}
-      wait_timeout_sec: ${{ github.event.inputs.wait_timeout_sec || '300' }}
-      enable_hash_gate: true
-      last_hash_value: ${{ vars.LAST_SERVER_HASH }}
-      last_hash_name: LAST_SERVER_HASH
-      hash_repo_owner: hugegraph
-      hash_repo_name: actions
+      branch: ${{ inputs.branch }}
+      mvn_args: ${{ inputs.mvn_args }}
+      strict_mode: ${{ inputs.strict_mode }}
+      wait_timeout_sec: ${{ inputs.wait_timeout_sec || '300' }}
+      enable_hash_gate: false
     secrets: inherit
