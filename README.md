@@ -22,20 +22,15 @@ The image publishing workflows are intentionally split into two layers:
           +------------+---------------+
                        |
                        v
-      .github/workflows/_publish_image_reusable.yml
+         reusable workflow implementation
                        |
-     +-----------------+-------------------+
-     |                                     |
-     v                                     v
- resolve mode / branch / tag         build matrix per module
-     |                                     |
-     v                                     v
- optional hash gate                  optional smoke test
-     |                                     |
-     +-----------------+-------------------+
-                       |
-                       v
-                 docker build/push
+     +-----------------+----------------------------+
+     |                                              |
+     v                                              v
+_publish_image_reusable.yml         _publish_pd_store_server_reusable.yml
+     |                                              |
+     v                                              v
+standard single-image flow          pd/store/server specialized flow
 ```
 
 The two publishing modes behave differently:
@@ -64,13 +59,15 @@ Although the `latest` and `release` wrappers look similar, they encode different
   - It expects a release branch and publishes that branch as a versioned image.
   - It should run even if the source is unchanged, because the operator is explicitly asking for a release publication.
 
-The common build logic already lives in [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml), so the thin wrapper files mainly exist to keep the trigger semantics obvious and safe.
+Most wrappers use [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).
+
+The pd/store/server wrappers use [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml), which adds integration precheck plus staged amd64/arm64 publish and manifest merge.
 
 ## Reusable Workflow Responsibilities
 
-[`_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml) is the real implementation layer.
+Reusable workflows are the real implementation layer.
 
-It handles:
+`_publish_image_reusable.yml` handles the standard image flow:
 
 - resolving `latest` vs `release` mode
 - checking out the correct source commit
@@ -81,15 +78,24 @@ It handles:
 - pushing the final image
 - updating the latest-hash variable for `latest` mode only
 
-Wrapper workflows only provide the source repository, branch, matrix definition, and mode-specific inputs.
+`_publish_pd_store_server_reusable.yml` handles the pd/store/server flow:
+
+- shared source SHA resolution and latest hash gate
+- strict integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
+- staged image publication with `*-amd64` then `*-arm64`
+- manifest merge to final tag (`latest` or release version)
+- standalone server smoke test for `hugegraph/hugegraph`
+
+Wrapper workflows provide the source repository, branch, and mode-specific inputs.
+Standard wrappers may also pass `build_matrix_json`, while the pd/store/server matrix is defined inside `_publish_pd_store_server_reusable.yml`.
 
 ## How To Extend
 
 When adding a new image publishing workflow, follow the same pattern:
 
-1. Create a thin `publish_latest_*.yml` wrapper if the image needs scheduled or hash-gated automatic publishing.
+1. Create a thin `publish_latest_*.yml` wrapper if the image needs to be scheduled or hash-gated for automatic publishing.
 2. Create a matching `publish_release_*.yml` wrapper if the image also needs manual release publishing.
-3. Put all shared build behavior into `_publish_image_reusable.yml` instead of duplicating Docker or checkout logic.
+3. Put shared build behavior into the appropriate reusable workflow instead of duplicating Docker or checkout logic.
 4. Put image-specific values in the wrapper via `build_matrix_json`, especially:
    - module name
    - Dockerfile path
@@ -109,15 +115,13 @@ Keep a dedicated workflow file when the publishing flow has materially different
 - different trigger semantics that do not fit the `latest` / `release` split
 - legacy workflows that still require bespoke setup
 
-For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.github/workflows/publish_latest_pd_store_server_image.yml) has a more customized precheck-oriented flow than the standard image publishers.
+For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.github/workflows/publish_latest_pd_store_server_image.yml) and [`.github/workflows/publish_release_pd_store_server_image.yml`](./.github/workflows/publish_release_pd_store_server_image.yml) use a dedicated reusable workflow for specialized precheck and publish sequencing.
 
 ## Current Workflow Map
 
 - Standard reusable publish path:
   - [`.github/workflows/publish_latest_loader_image.yml`](./.github/workflows/publish_latest_loader_image.yml)
   - [`.github/workflows/publish_release_loader_image.yml`](./.github/workflows/publish_release_loader_image.yml)
-  - [`.github/workflows/publish_latest_server_image.yml`](./.github/workflows/publish_latest_server_image.yml)
-  - [`.github/workflows/publish_release_server_image.yml`](./.github/workflows/publish_release_server_image.yml)
   - [`.github/workflows/publish_latest_hubble_image.yml`](./.github/workflows/publish_latest_hubble_image.yml)
   - [`.github/workflows/publish_release_hubble_image.yml`](./.github/workflows/publish_release_hubble_image.yml)
   - [`.github/workflows/publish_latest_vermeer_image.yml`](./.github/workflows/publish_latest_vermeer_image.yml)
@@ -125,14 +129,18 @@ For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.g
   - [`.github/workflows/publish_latest_ai_image.yml`](./.github/workflows/publish_latest_ai_image.yml)
   - [`.github/workflows/publish_release_ai_image.yml`](./.github/workflows/publish_release_ai_image.yml)
 
-- Legacy or special-case workflows:
+- Dedicated reusable publish path:
+  - [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.github/workflows/publish_latest_pd_store_server_image.yml)
+  - [`.github/workflows/publish_release_pd_store_server_image.yml`](./.github/workflows/publish_release_pd_store_server_image.yml)
+
+- Other legacy or special-case workflows:
   - [`.github/workflows/publish_hugegraph_hubble.yml`](./.github/workflows/publish_hugegraph_hubble.yml)
   - [`.github/workflows/publish_computer_image.yml`](./.github/workflows/publish_computer_image.yml)
-  - [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.github/workflows/publish_latest_pd_store_server_image.yml)
 
 ## Practical Notes
 
 - `latest` workflows typically run on a schedule and accept manual dispatch.
 - `release` workflows typically accept only manual dispatch with a branch input.
-- Most image workflows inherit credentials and settings through the reusable workflow.
-- If you change the shared publishing behavior, update `_publish_image_reusable.yml` first and then adjust wrappers only where their inputs change.
+- Most image workflows inherit credentials and settings through a reusable workflow.
+- If you change shared standard behavior, update `_publish_image_reusable.yml` first.
+- If you change pd/store/server behavior, update `_publish_pd_store_server_reusable.yml` first.

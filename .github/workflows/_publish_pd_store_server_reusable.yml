@@ -1,0 +1,518 @@
+name: "Publish pd-store-server image (reusable)"
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "publish mode: latest or release"
+        required: true
+        type: string
+      repository_url:
+        description: "source repository in owner/name format"
+        required: false
+        default: apache/hugegraph
+        type: string
+      branch:
+        description: "source branch name"
+        required: true
+        type: string
+      mvn_args:
+        description: "mvn build args"
+        required: false
+        default: ''
+        type: string
+      strict_mode:
+        description: "whether integration precheck is mandatory before publish"
+        required: false
+        default: true
+        type: boolean
+      wait_timeout_sec:
+        description: "docker compose wait timeout in seconds"
+        required: false
+        default: '300'
+        type: string
+      enable_hash_gate:
+        description: "whether to skip latest publish if source hash unchanged"
+        required: false
+        default: false
+        type: boolean
+      last_hash_value:
+        description: "last published source hash"
+        required: false
+        default: ''
+        type: string
+      last_hash_name:
+        description: "repo variable name for latest hash"
+        required: false
+        default: ''
+        type: string
+      hash_repo_owner:
+        description: "owner of repo storing LAST_* hash variable"
+        required: false
+        default: hugegraph
+        type: string
+      hash_repo_name:
+        description: "repo name storing LAST_* hash variable"
+        required: false
+        default: actions
+        type: string
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_PASSWORD:
+        required: true
+      PERSONAL_ACCESS_TOKEN:
+        required: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      need_update: ${{ steps.prepare.outputs.need_update }}
+      source_sha: ${{ steps.prepare.outputs.source_sha }}
+      version_tag: ${{ steps.prepare.outputs.version_tag }}
+      build_matrix_json: ${{ steps.prepare.outputs.build_matrix_json }}
+    steps:
+    - name: Resolve mode and source ref
+      id: prepare
+      env:
+        MODE: ${{ inputs.mode }}
+        REPOSITORY_URL: ${{ inputs.repository_url }}
+        BRANCH: ${{ inputs.branch }}
+        ENABLE_HASH_GATE: ${{ inputs.enable_hash_gate }}
+        LAST_HASH_VALUE: ${{ inputs.last_hash_value }}
+      run: |
+        set -euo pipefail
+
+        if [ "$MODE" != "latest" ] && [ "$MODE" != "release" ]; then
+          echo "Invalid mode: $MODE. Expected latest or release."
+          exit 1
+        fi
+
+        source_sha="$(git ls-remote "https://github.com/${REPOSITORY_URL}.git" "refs/heads/${BRANCH}" | awk '{print $1}')"
+        if [ -z "$source_sha" ]; then
+          echo "Failed to resolve source SHA for ${REPOSITORY_URL}@${BRANCH}"
+          exit 1
+        fi
+
+        if [ "$MODE" = "latest" ]; then
+          version_tag="latest"
+          need_update="true"
+          if [ "$ENABLE_HASH_GATE" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
+            need_update="false"
+          fi
+        else
+          version_tag="$(echo "$BRANCH" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+          if [ -z "$version_tag" ]; then
+            echo "Branch name does not contain a valid version number (x.x.x): $BRANCH"
+            exit 1
+          fi
+          need_update="true"
+        fi
+
+        {
+          echo "source_sha=$source_sha"
+          echo "version_tag=$version_tag"
+          echo "need_update=$need_update"
+          echo "build_matrix_json<<EOF"
+          cat <<'JSON'
+          [
+            {
+              "module": "pd",
+              "image_repo": "hugegraph/pd",
+              "dockerfile": "./hugegraph-pd/Dockerfile",
+              "smoke_test": false
+            },
+            {
+              "module": "store",
+              "image_repo": "hugegraph/store",
+              "dockerfile": "./hugegraph-store/Dockerfile",
+              "smoke_test": false
+            },
+            {
+              "module": "server-hstore",
+              "image_repo": "hugegraph/server",
+              "dockerfile": "./hugegraph-server/Dockerfile-hstore",
+              "smoke_test": false
+            },
+            {
+              "module": "server-standalone",
+              "image_repo": "hugegraph/hugegraph",
+              "dockerfile": "./hugegraph-server/Dockerfile",
+              "smoke_test": true
+            }
+          ]
+        JSON
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+
+  integration_precheck:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.need_update == 'true' && inputs.strict_mode }}
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY_URL: ${{ inputs.repository_url }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      MVN_ARGS: ${{ inputs.mvn_args }}
+      WAIT_TIMEOUT_SEC: ${{ inputs.wait_timeout_sec }}
+    steps:
+    - name: Validate wait timeout
+      run: |
+        if ! [[ "$WAIT_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [ "$WAIT_TIMEOUT_SEC" -lt 30 ] || [ "$WAIT_TIMEOUT_SEC" -gt 1800 ]; then
+          echo "Invalid wait_timeout_sec: $WAIT_TIMEOUT_SEC. Expected integer between 30 and 1800."
+          exit 1
+        fi
+
+    - name: Checkout source
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.REPOSITORY_URL }}
+        ref: ${{ env.SOURCE_SHA }}
+        fetch-depth: 2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+      with:
+        version: latest
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v4
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Precheck cleanup
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
+
+    - name: Build x86 PD image for integration check
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ./hugegraph-pd/Dockerfile
+        platforms: linux/amd64
+        load: true
+        tags: hg-ci/pd:precheck
+        cache-from: type=gha,scope=pd-store-server-pd-amd64
+        cache-to: type=gha,scope=pd-store-server-pd-amd64,mode=min,ignore-error=true
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Build x86 Store image for integration check
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ./hugegraph-store/Dockerfile
+        platforms: linux/amd64
+        load: true
+        tags: hg-ci/store:precheck
+        cache-from: type=gha,scope=pd-store-server-store-amd64
+        cache-to: type=gha,scope=pd-store-server-store-amd64,mode=min,ignore-error=true
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Build x86 Server(hstore) image for integration check
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ./hugegraph-server/Dockerfile-hstore
+        platforms: linux/amd64
+        load: true
+        tags: hg-ci/server:precheck
+        cache-from: type=gha,scope=pd-store-server-server-hstore-amd64
+        cache-to: type=gha,scope=pd-store-server-server-hstore-amd64,mode=min,ignore-error=true
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Start compose stack with local images
+      run: |
+        if [ ! -f "docker/docker-compose.yml" ]; then
+          echo "ERROR: docker/docker-compose.yml not found in $REPOSITORY_URL@$SOURCE_SHA"
+          echo "Please update the compose file path in this workflow."
+          exit 1
+        fi
+
+        cat > /tmp/docker-compose.ci.override.yml <<COMPOSE_OVERRIDE
+        services:
+          pd:
+            image: hg-ci/pd:precheck
+            pull_policy: never
+          store:
+            image: hg-ci/store:precheck
+            pull_policy: never
+          server:
+            image: hg-ci/server:precheck
+            pull_policy: never
+        COMPOSE_OVERRIDE
+
+        docker compose \
+          -p hg-ci-precheck \
+          -f docker/docker-compose.yml \
+          -f /tmp/docker-compose.ci.override.yml \
+          up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
+
+        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml ps
+
+    - name: Verify integration endpoints
+      run: |
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8620/v1/health" >/dev/null
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8520/v1/health" >/dev/null
+        curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8080/versions" >/dev/null
+
+    - name: Dump compose logs on failure
+      if: ${{ failure() }}
+      run: |
+        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
+
+    - name: Stop compose stack
+      if: ${{ always() }}
+      run: |
+        docker compose \
+          -p hg-ci-precheck \
+          -f docker/docker-compose.yml \
+          -f /tmp/docker-compose.ci.override.yml \
+          down -v --remove-orphans || true
+
+    - name: Post-check cleanup
+      if: ${{ always() }}
+      run: |
+        docker system prune -af || true
+        docker builder prune -af || true
+
+  publish_amd64:
+    needs: [prepare, integration_precheck]
+    if: ${{ needs.prepare.outputs.need_update == 'true' && (needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.build_matrix_json) }}
+    env:
+      REPOSITORY_URL: ${{ inputs.repository_url }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
+      MVN_ARGS: ${{ inputs.mvn_args }}
+    steps:
+    - name: Resolve tags (${{ matrix.module }})
+      id: tags
+      env:
+        IMAGE_REPO: ${{ matrix.image_repo }}
+      run: |
+        image_amd64="${IMAGE_REPO}:${VERSION_TAG}-amd64"
+        module_cache_scope="pd-store-server-${{ matrix.module }}-amd64"
+
+        {
+          echo "image_amd64=$image_amd64"
+          echo "module_cache_scope=$module_cache_scope"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Checkout source (${{ matrix.module }})
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.REPOSITORY_URL }}
+        ref: ${{ env.SOURCE_SHA }}
+        fetch-depth: 2
+
+    - name: Set up Docker Buildx (${{ matrix.module }})
+      uses: docker/setup-buildx-action@v4
+      with:
+        version: latest
+
+    - name: Login to Docker Hub (${{ matrix.module }})
+      uses: docker/login-action@v4
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Build and load amd64 image for smoke test (${{ matrix.module }})
+      if: ${{ matrix.smoke_test }}
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ${{ matrix.dockerfile }}
+        platforms: linux/amd64
+        load: true
+        tags: ${{ steps.tags.outputs.image_amd64 }}
+        cache-from: type=gha,scope=${{ steps.tags.outputs.module_cache_scope }}
+        cache-to: type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Build and push amd64 image (${{ matrix.module }})
+      if: ${{ !matrix.smoke_test }}
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ${{ matrix.dockerfile }}
+        platforms: linux/amd64
+        push: true
+        tags: ${{ steps.tags.outputs.image_amd64 }}
+        cache-from: type=gha,scope=${{ steps.tags.outputs.module_cache_scope }}
+        cache-to: type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
+        build-args: ${{ env.MVN_ARGS }}
+
+    - name: Smoke test standalone server amd64
+      if: ${{ matrix.smoke_test }}
+      env:
+        IMAGE_URL: ${{ steps.tags.outputs.image_amd64 }}
+      run: |
+        docker rm -f graph >/dev/null 2>&1 || true
+        docker run -d --name=graph -p 18080:8080 "$IMAGE_URL"
+        sleep 20
+        curl -fsS http://127.0.0.1:18080 >/dev/null || exit 1
+        docker ps -a
+        sleep 20
+        curl -fsS http://127.0.0.1:18080 >/dev/null || exit 1
+
+    - name: Push tested amd64 image (${{ matrix.module }})
+      if: ${{ matrix.smoke_test }}
+      env:
+        IMAGE_URL: ${{ steps.tags.outputs.image_amd64 }}
+      run: |
+        docker push "$IMAGE_URL"
+
+    - name: Cleanup smoke test container
+      if: ${{ always() && matrix.smoke_test }}
+      run: |
+        docker rm -f graph >/dev/null 2>&1 || true
+
+  publish_arm64:
+    needs: [prepare, integration_precheck, publish_amd64]
+    if: ${{ needs.prepare.outputs.need_update == 'true' && needs.publish_amd64.result == 'success' && (needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.build_matrix_json) }}
+    env:
+      REPOSITORY_URL: ${{ inputs.repository_url }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
+      MVN_ARGS: ${{ inputs.mvn_args }}
+    steps:
+    - name: Resolve tags (${{ matrix.module }})
+      id: tags
+      env:
+        IMAGE_REPO: ${{ matrix.image_repo }}
+      run: |
+        image_arm64="${IMAGE_REPO}:${VERSION_TAG}-arm64"
+        module_cache_scope="pd-store-server-${{ matrix.module }}-arm64"
+
+        {
+          echo "image_arm64=$image_arm64"
+          echo "module_cache_scope=$module_cache_scope"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Checkout source (${{ matrix.module }})
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.REPOSITORY_URL }}
+        ref: ${{ env.SOURCE_SHA }}
+        fetch-depth: 2
+
+    - name: Set up QEMU (${{ matrix.module }})
+      uses: docker/setup-qemu-action@v4
+
+    - name: Set up Docker Buildx (${{ matrix.module }})
+      uses: docker/setup-buildx-action@v4
+      with:
+        version: latest
+
+    - name: Login to Docker Hub (${{ matrix.module }})
+      uses: docker/login-action@v4
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Build and push arm64 image (${{ matrix.module }})
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ${{ matrix.dockerfile }}
+        platforms: linux/arm64
+        push: true
+        tags: ${{ steps.tags.outputs.image_arm64 }}
+        cache-from: type=gha,scope=${{ steps.tags.outputs.module_cache_scope }}
+        cache-to: type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
+        build-args: ${{ env.MVN_ARGS }}
+
+  publish_manifest:
+    needs: [prepare, publish_amd64, publish_arm64]
+    if: ${{ needs.prepare.outputs.need_update == 'true' && needs.publish_amd64.result == 'success' && needs.publish_arm64.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.build_matrix_json) }}
+    env:
+      VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
+    steps:
+    - name: Resolve tags (${{ matrix.module }})
+      id: tags
+      env:
+        IMAGE_REPO: ${{ matrix.image_repo }}
+      run: |
+        image_final="${IMAGE_REPO}:${VERSION_TAG}"
+        image_amd64="${IMAGE_REPO}:${VERSION_TAG}-amd64"
+        image_arm64="${IMAGE_REPO}:${VERSION_TAG}-arm64"
+
+        {
+          echo "image_final=$image_final"
+          echo "image_amd64=$image_amd64"
+          echo "image_arm64=$image_arm64"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Set up Docker Buildx (${{ matrix.module }})
+      uses: docker/setup-buildx-action@v4
+      with:
+        version: latest
+
+    - name: Login to Docker Hub (${{ matrix.module }})
+      uses: docker/login-action@v4
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Create multi-arch manifest (${{ matrix.module }})
+      run: |
+        docker buildx imagetools create \
+          --tag "${{ steps.tags.outputs.image_final }}" \
+          "${{ steps.tags.outputs.image_amd64 }}" \
+          "${{ steps.tags.outputs.image_arm64 }}"
+
+    - name: Inspect multi-arch manifest (${{ matrix.module }})
+      run: |
+        docker buildx imagetools inspect "${{ steps.tags.outputs.image_final }}"
+
+  update_latest_hash:
+    needs: [prepare, publish_manifest]
+    if: ${{ inputs.mode == 'latest' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish_manifest.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Validate hash update inputs
+      env:
+        LAST_HASH_NAME: ${{ inputs.last_hash_name }}
+        PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+      run: |
+        set -euo pipefail
+        if [ -z "$LAST_HASH_NAME" ]; then
+          echo "last_hash_name is required when enable_hash_gate=true"
+          exit 1
+        fi
+        if [ -z "$PERSONAL_ACCESS_TOKEN" ]; then
+          echo "PERSONAL_ACCESS_TOKEN is required to update latest hash"
+          exit 1
+        fi
+
+    - name: Update latest source hash variable
+      env:
+        OWNER: ${{ inputs.hash_repo_owner }}
+        REPO: ${{ inputs.hash_repo_name }}
+        LAST_HASH_NAME: ${{ inputs.last_hash_name }}
+        SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+      run: |
+        set -euo pipefail
+        curl --fail-with-body -sS -L -X PATCH \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
+          "https://api.github.com/repos/$OWNER/$REPO/actions/variables/$LAST_HASH_NAME" \
+          -d '{"name":"'"$LAST_HASH_NAME"'","value":"'"$SOURCE_SHA"'"}'
