@@ -45,6 +45,48 @@ The two publishing modes behave differently:
   - always publishes when invoked
   - derives the image tag from the release branch version
 
+## Critical Path: PD/Store/Server
+
+`pd/store/server` is the most important publishing flow in this repository and uses a dedicated reusable workflow:
+[`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml).
+
+```text
+               source branch (master / release-x.y.z)
+                              |
+                              v
+                         prepare job
+           (resolve source SHA, version tag, hash gate)
+                              |
+                              v
+                  integration_precheck (optional)
+            (compose health check for pd/store/server-hstore)
+                              |
+                              v
+                   publish_amd64 (matrix x4 modules)
+         +-------------------------------------------------+
+         | pd | store | server-hstore | server-standalone |
+         +-------------------------------------------------+
+                push x.y.z-amd64 (or latest-amd64)
+                              |
+                              v
+                   publish_arm64 (matrix x4 modules)
+                push x.y.z-arm64 (or latest-arm64)
+                              |
+                              v
+                 publish_manifest (matrix x4 modules)
+         merge amd64+arm64 => x.y.z (or latest) manifest
+         then delete temporary -amd64 / -arm64 tags
+                              |
+                              v
+             update_latest_hash (latest mode only, optional)
+```
+
+Tag behavior:
+
+- If only amd64 is published and arm64 fails, manifest is not created and `*-amd64` remains available.
+- If both amd64 and arm64 succeed, manifest publish runs and then removes temporary `*-amd64` and `*-arm64` tags.
+- End users should primarily use `latest` or release version tags (`x.y.z`).
+
 ## Why The Wrappers Stay Split
 
 Although the `latest` and `release` wrappers look similar, they encode different release semantics.
@@ -84,6 +126,7 @@ Reusable workflows are the real implementation layer.
 - strict integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
 - staged image publication with `*-amd64` then `*-arm64`
 - manifest merge to final tag (`latest` or release version)
+- remove temporary `*-amd64` and `*-arm64` tags after successful manifest publish
 - standalone server smoke test for `hugegraph/hugegraph`
 
 Wrapper workflows provide the source repository, branch, and mode-specific inputs.

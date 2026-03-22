@@ -9,8 +9,9 @@ Its main purpose is to publish Docker images, validate releases, and host small 
 
 - `latest` publishing is the automated path: scheduled or manually triggered, with hash gating to skip unchanged sources.
 - `release` publishing is the manual path: it publishes from a versioned branch and should run even if the source is unchanged.
-- Shared image publishing logic lives in [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).
-- Thin `publish_latest_*.yml` and `publish_release_*.yml` files are wrappers that define trigger policy and per-image inputs.
+- Most image publishers share [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).
+- `pd/store/server` uses [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml) with strict precheck and staged amd64/arm64 -> manifest flow.
+- In the pd/store/server path, temporary `*-amd64` and `*-arm64` tags are cleaned only after a successful manifest publish.
 
 ## Editing Rules
 
@@ -18,6 +19,9 @@ Its main purpose is to publish Docker images, validate releases, and host small 
 - Keep wrapper workflows thin and explicit.
 - Do not merge `latest` and `release` wrappers unless the trigger semantics are truly identical.
 - Keep special-case workflows separate when they need extra prechecks, custom ordering, or non-standard release flow.
+- For pd/store/server changes, preserve this intent:
+  - arm64 failure should not erase already published amd64 artifacts
+  - only full dual-arch success should trigger manifest + temporary tag cleanup
 
 ## Important Files
 
@@ -31,4 +35,3 @@ Its main purpose is to publish Docker images, validate releases, and host small 
 - Read the relevant workflow and the reusable workflow together.
 - Preserve existing trigger semantics unless the task explicitly asks for a behavioral change.
 - Check whether the workflow is a standard publisher or a legacy / special-case flow before refactoring.
-
