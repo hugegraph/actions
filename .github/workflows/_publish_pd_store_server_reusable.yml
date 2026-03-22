@@ -70,7 +70,6 @@ jobs:
     outputs:
       need_update: ${{ steps.prepare.outputs.need_update }}
       source_sha: ${{ steps.prepare.outputs.source_sha }}
-      checkout_ref: ${{ steps.prepare.outputs.checkout_ref }}
       version_tag: ${{ steps.prepare.outputs.version_tag }}
       build_matrix_json: ${{ steps.prepare.outputs.build_matrix_json }}
     steps:
@@ -96,8 +95,6 @@ jobs:
           exit 1
         fi
 
-        checkout_ref="$source_sha"
-
         if [ "$MODE" = "latest" ]; then
           version_tag="latest"
           need_update="true"
@@ -113,14 +110,40 @@ jobs:
           need_update="true"
         fi
 
-        build_matrix_json='[{"module":"pd","image_repo":"hugegraph/pd","dockerfile":"./hugegraph-pd/Dockerfile","smoke_test":false},{"module":"store","image_repo":"hugegraph/store","dockerfile":"./hugegraph-store/Dockerfile","smoke_test":false},{"module":"server-hstore","image_repo":"hugegraph/server","dockerfile":"./hugegraph-server/Dockerfile-hstore","smoke_test":false},{"module":"server-standalone","image_repo":"hugegraph/hugegraph","dockerfile":"./hugegraph-server/Dockerfile","smoke_test":true}]'
-
         {
           echo "source_sha=$source_sha"
-          echo "checkout_ref=$checkout_ref"
           echo "version_tag=$version_tag"
           echo "need_update=$need_update"
-          echo "build_matrix_json=$build_matrix_json"
+          echo "build_matrix_json<<EOF"
+          cat <<'JSON'
+          [
+            {
+              "module": "pd",
+              "image_repo": "hugegraph/pd",
+              "dockerfile": "./hugegraph-pd/Dockerfile",
+              "smoke_test": false
+            },
+            {
+              "module": "store",
+              "image_repo": "hugegraph/store",
+              "dockerfile": "./hugegraph-store/Dockerfile",
+              "smoke_test": false
+            },
+            {
+              "module": "server-hstore",
+              "image_repo": "hugegraph/server",
+              "dockerfile": "./hugegraph-server/Dockerfile-hstore",
+              "smoke_test": false
+            },
+            {
+              "module": "server-standalone",
+              "image_repo": "hugegraph/hugegraph",
+              "dockerfile": "./hugegraph-server/Dockerfile",
+              "smoke_test": true
+            }
+          ]
+        JSON
+          echo "EOF"
         } >> "$GITHUB_OUTPUT"
 
   integration_precheck:

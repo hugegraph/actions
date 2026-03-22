@@ -80,7 +80,7 @@ Reusable workflows are the real implementation layer.
 `_publish_pd_store_server_reusable.yml` handles the pd/store/server flow:
 
 - shared source SHA resolution and latest hash gate
-- strict integration precheck for pd/store/server(hstore)
+- strict integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
 - staged image publication with `*-amd64` then `*-arm64`
 - manifest merge to final tag (`latest` or release version)
 - standalone server smoke test for `hugegraph/hugegraph`
@@ -130,7 +130,6 @@ For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.g
 - Dedicated reusable publish path:
   - [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.github/workflows/publish_latest_pd_store_server_image.yml)
   - [`.github/workflows/publish_release_pd_store_server_image.yml`](./.github/workflows/publish_release_pd_store_server_image.yml)
-  - [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml)
 
 - Other legacy or special-case workflows:
   - [`.github/workflows/publish_hugegraph_hubble.yml`](./.github/workflows/publish_hugegraph_hubble.yml)
