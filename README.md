@@ -85,7 +85,8 @@ Reusable workflows are the real implementation layer.
 - manifest merge to final tag (`latest` or release version)
 - standalone server smoke test for `hugegraph/hugegraph`
 
-Wrapper workflows only provide the source repository, branch, matrix definition, and mode-specific inputs.
+Wrapper workflows provide the source repository, branch, and mode-specific inputs.
+Standard wrappers may also pass `build_matrix_json`, while the pd/store/server matrix is defined inside `_publish_pd_store_server_reusable.yml`.
 
 ## How To Extend
 

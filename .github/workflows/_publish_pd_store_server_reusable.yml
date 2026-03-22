@@ -336,7 +336,25 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
+    - name: Build and load amd64 image for smoke test (${{ matrix.module }})
+      if: ${{ matrix.smoke_test }}
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: ${{ matrix.dockerfile }}
+        platforms: linux/amd64
+        load: true
+        tags: ${{ steps.tags.outputs.image_amd64 }}
+        cache-from: |
+          type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }}
+          type=gha,scope=${{ steps.tags.outputs.module_cache_scope }}
+        cache-to: |
+          type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }},mode=min,ignore-error=true
+          type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
+        build-args: ${{ env.MVN_ARGS }}
+
     - name: Build and push amd64 image (${{ matrix.module }})
+      if: ${{ !matrix.smoke_test }}
       uses: docker/build-push-action@v7
       with:
         context: .
@@ -364,6 +382,13 @@ jobs:
         docker ps -a
         sleep 20
         curl -fsS http://127.0.0.1:18080 >/dev/null || exit 1
+
+    - name: Push tested amd64 image (${{ matrix.module }})
+      if: ${{ matrix.smoke_test }}
+      env:
+        IMAGE_URL: ${{ steps.tags.outputs.image_amd64 }}
+      run: |
+        docker push "$IMAGE_URL"
 
     - name: Cleanup smoke test container
       if: ${{ always() && matrix.smoke_test }}

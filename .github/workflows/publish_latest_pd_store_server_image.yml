@@ -31,7 +31,7 @@ jobs:
       repository_url: apache/hugegraph
       branch: master
       mvn_args: ${{ github.event.inputs.mvn_args || '' }}
-      strict_mode: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.strict_mode != 'false' }}
+      strict_mode: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.strict_mode == true || github.event.inputs.strict_mode == 'true' }}
       wait_timeout_sec: ${{ github.event.inputs.wait_timeout_sec || '300' }}
       enable_hash_gate: true
       last_hash_value: ${{ vars.LAST_SERVER_HASH }}
