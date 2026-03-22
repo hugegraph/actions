@@ -59,7 +59,8 @@ Although the `latest` and `release` wrappers look similar, they encode different
   - It expects a release branch and publishes that branch as a versioned image.
   - It should run even if the source is unchanged, because the operator is explicitly asking for a release publication.
 
-Most wrappers use [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).  
+Most wrappers use [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).
+
 The pd/store/server wrappers use [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml), which adds integration precheck plus staged amd64/arm64 publish and manifest merge.
 
 ## Reusable Workflow Responsibilities
@@ -92,7 +93,7 @@ Standard wrappers may also pass `build_matrix_json`, while the pd/store/server m
 
 When adding a new image publishing workflow, follow the same pattern:
 
-1. Create a thin `publish_latest_*.yml` wrapper if the image needs scheduled or hash-gated automatic publishing.
+1. Create a thin `publish_latest_*.yml` wrapper if the image needs to be scheduled or hash-gated for automatic publishing.
 2. Create a matching `publish_release_*.yml` wrapper if the image also needs manual release publishing.
 3. Put shared build behavior into the appropriate reusable workflow instead of duplicating Docker or checkout logic.
 4. Put image-specific values in the wrapper via `build_matrix_json`, especially:

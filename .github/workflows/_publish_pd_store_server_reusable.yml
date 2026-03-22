@@ -197,9 +197,7 @@ jobs:
         cache-from: |
           type=gha,scope=pd-store-server-shared-amd64
           type=gha,scope=pd-store-server-pd-amd64
-        cache-to: |
-          type=gha,scope=pd-store-server-shared-amd64,mode=min,ignore-error=true
-          type=gha,scope=pd-store-server-pd-amd64,mode=min,ignore-error=true
+        cache-to: type=gha,scope=pd-store-server-pd-amd64,mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Build x86 Store image for integration check
@@ -213,9 +211,7 @@ jobs:
         cache-from: |
           type=gha,scope=pd-store-server-shared-amd64
           type=gha,scope=pd-store-server-store-amd64
-        cache-to: |
-          type=gha,scope=pd-store-server-shared-amd64,mode=min,ignore-error=true
-          type=gha,scope=pd-store-server-store-amd64,mode=min,ignore-error=true
+        cache-to: type=gha,scope=pd-store-server-store-amd64,mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Build x86 Server(hstore) image for integration check
@@ -229,9 +225,7 @@ jobs:
         cache-from: |
           type=gha,scope=pd-store-server-shared-amd64
           type=gha,scope=pd-store-server-server-hstore-amd64
-        cache-to: |
-          type=gha,scope=pd-store-server-shared-amd64,mode=min,ignore-error=true
-          type=gha,scope=pd-store-server-server-hstore-amd64,mode=min,ignore-error=true
+        cache-to: type=gha,scope=pd-store-server-server-hstore-amd64,mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Start compose stack with local images
@@ -348,9 +342,7 @@ jobs:
         cache-from: |
           type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }}
           type=gha,scope=${{ steps.tags.outputs.module_cache_scope }}
-        cache-to: |
-          type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }},mode=min,ignore-error=true
-          type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
+        cache-to: type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Build and push amd64 image (${{ matrix.module }})
@@ -365,9 +357,7 @@ jobs:
         cache-from: |
           type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }}
           type=gha,scope=${{ steps.tags.outputs.module_cache_scope }}
-        cache-to: |
-          type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }},mode=min,ignore-error=true
-          type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
+        cache-to: type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Smoke test standalone server amd64
@@ -456,9 +446,7 @@ jobs:
         cache-from: |
           type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }}
           type=gha,scope=${{ steps.tags.outputs.module_cache_scope }}
-        cache-to: |
-          type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }},mode=min,ignore-error=true
-          type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
+        cache-to: type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
   publish_manifest:
