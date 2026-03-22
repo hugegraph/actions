@@ -171,8 +171,12 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: hg-ci/pd:precheck
-        cache-from: type=gha,scope=pd-store-server-pd
-        cache-to: type=gha,scope=pd-store-server-pd,mode=min
+        cache-from: |
+          type=gha,scope=pd-store-server-shared-amd64
+          type=gha,scope=pd-store-server-pd-amd64
+        cache-to: |
+          type=gha,scope=pd-store-server-shared-amd64,mode=min,ignore-error=true
+          type=gha,scope=pd-store-server-pd-amd64,mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Build x86 Store image for integration check
@@ -183,8 +187,12 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: hg-ci/store:precheck
-        cache-from: type=gha,scope=pd-store-server-store
-        cache-to: type=gha,scope=pd-store-server-store,mode=min
+        cache-from: |
+          type=gha,scope=pd-store-server-shared-amd64
+          type=gha,scope=pd-store-server-store-amd64
+        cache-to: |
+          type=gha,scope=pd-store-server-shared-amd64,mode=min,ignore-error=true
+          type=gha,scope=pd-store-server-store-amd64,mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Build x86 Server(hstore) image for integration check
@@ -195,8 +203,12 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: hg-ci/server:precheck
-        cache-from: type=gha,scope=pd-store-server-server-hstore
-        cache-to: type=gha,scope=pd-store-server-server-hstore,mode=min
+        cache-from: |
+          type=gha,scope=pd-store-server-shared-amd64
+          type=gha,scope=pd-store-server-server-hstore-amd64
+        cache-to: |
+          type=gha,scope=pd-store-server-shared-amd64,mode=min,ignore-error=true
+          type=gha,scope=pd-store-server-server-hstore-amd64,mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Start compose stack with local images
@@ -274,11 +286,13 @@ jobs:
         IMAGE_REPO: ${{ matrix.image_repo }}
       run: |
         image_amd64="${IMAGE_REPO}:${VERSION_TAG}-amd64"
-        cache_scope="pd-store-server-${{ matrix.module }}"
+        module_cache_scope="pd-store-server-${{ matrix.module }}-amd64"
+        shared_cache_scope="pd-store-server-shared-amd64"
 
         {
           echo "image_amd64=$image_amd64"
-          echo "cache_scope=$cache_scope"
+          echo "module_cache_scope=$module_cache_scope"
+          echo "shared_cache_scope=$shared_cache_scope"
         } >> "$GITHUB_OUTPUT"
 
     - name: Checkout source (${{ matrix.module }})
@@ -307,8 +321,12 @@ jobs:
         platforms: linux/amd64
         push: true
         tags: ${{ steps.tags.outputs.image_amd64 }}
-        cache-from: type=gha,scope=${{ steps.tags.outputs.cache_scope }}
-        cache-to: type=gha,scope=${{ steps.tags.outputs.cache_scope }},mode=max
+        cache-from: |
+          type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }}
+          type=gha,scope=${{ steps.tags.outputs.module_cache_scope }}
+        cache-to: |
+          type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }},mode=min,ignore-error=true
+          type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Smoke test standalone server amd64
@@ -349,11 +367,13 @@ jobs:
         IMAGE_REPO: ${{ matrix.image_repo }}
       run: |
         image_arm64="${IMAGE_REPO}:${VERSION_TAG}-arm64"
-        cache_scope="pd-store-server-${{ matrix.module }}"
+        module_cache_scope="pd-store-server-${{ matrix.module }}-arm64"
+        shared_cache_scope="pd-store-server-shared-arm64"
 
         {
           echo "image_arm64=$image_arm64"
-          echo "cache_scope=$cache_scope"
+          echo "module_cache_scope=$module_cache_scope"
+          echo "shared_cache_scope=$shared_cache_scope"
         } >> "$GITHUB_OUTPUT"
 
     - name: Checkout source (${{ matrix.module }})
@@ -385,8 +405,12 @@ jobs:
         platforms: linux/arm64
         push: true
         tags: ${{ steps.tags.outputs.image_arm64 }}
-        cache-from: type=gha,scope=${{ steps.tags.outputs.cache_scope }}
-        cache-to: type=gha,scope=${{ steps.tags.outputs.cache_scope }},mode=max
+        cache-from: |
+          type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }}
+          type=gha,scope=${{ steps.tags.outputs.module_cache_scope }}
+        cache-to: |
+          type=gha,scope=${{ steps.tags.outputs.shared_cache_scope }},mode=min,ignore-error=true
+          type=gha,scope=${{ steps.tags.outputs.module_cache_scope }},mode=min,ignore-error=true
         build-args: ${{ env.MVN_ARGS }}
 
   publish_manifest:
