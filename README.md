@@ -36,7 +36,7 @@ standard single-image flow          pd/store/server specialized flow
 The two publishing modes behave differently:
 
 - `latest` mode
-  - scheduled or ad-hoc publish for the current main branch line
+  - scheduled or ad-hoc publish for the current default branch line (master in `apache/hugegraph`)
   - skips work when the source hash has not changed
   - updates the stored `LAST_*_HASH` variable after a successful publish
 
@@ -83,9 +83,13 @@ The two publishing modes behave differently:
 
 Tag behavior:
 
-- If only amd64 is published and arm64 fails, manifest is not created and `*-amd64` remains available.
+- If the `amd64` publish succeeds but the `arm64` publish fails, manifest is not created and the `*-amd64` tag remains available.
 - If both amd64 and arm64 succeed, manifest publish runs and then removes temporary `*-amd64` and `*-arm64` tags.
 - End users should primarily use `latest` or release version tags (`x.y.z`).
+
+Execution note:
+
+- `publish_arm64` runs after `publish_amd64` by design, so x86 users can get a usable image earlier and arm64 compute is not spent when amd64 fails.
 
 ## Why The Wrappers Stay Split
 

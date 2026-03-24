@@ -482,6 +482,7 @@ jobs:
         docker buildx imagetools inspect "${{ steps.tags.outputs.image_final }}"
 
     - name: Delete temporary arch tags after manifest publish (${{ matrix.module }})
+      continue-on-error: true
       env:
         IMAGE_REPO: ${{ matrix.image_repo }}
         VERSION_TAG: ${{ env.VERSION_TAG }}
@@ -497,10 +498,12 @@ jobs:
           exit 1
         fi
 
+        login_payload="$(jq -nc --arg u "$DOCKERHUB_USERNAME" --arg p "$DOCKERHUB_PASSWORD" '{username:$u,password:$p}')"
         auth_token="$(
-          curl --fail-with-body -sS -X POST "https://hub.docker.com/v2/users/login/" \
-            -H "Content-Type: application/json" \
-            -d '{"username":"'"$DOCKERHUB_USERNAME"'","password":"'"$DOCKERHUB_PASSWORD"'"}' \
+          printf '%s' "$login_payload" \
+          | curl --fail-with-body -sS -X POST "https://hub.docker.com/v2/users/login/" \
+              -H "Content-Type: application/json" \
+              --data-binary @- \
           | jq -r '.token'
         )"
         if [ -z "$auth_token" ] || [ "$auth_token" = "null" ]; then
@@ -513,11 +516,14 @@ jobs:
           local attempt=1
           local max_attempts=5
           while [ "$attempt" -le "$max_attempts" ]; do
-            status_code="$(
+            if ! status_code="$(
               curl -sS -o /tmp/dockerhub-delete-response.txt -w "%{http_code}" -X DELETE \
                 -H "Authorization: JWT $auth_token" \
                 "https://hub.docker.com/v2/repositories/${namespace}/${repository}/tags/${tag}/"
-            )"
+            )"; then
+              status_code="000"
+              echo "Delete ${IMAGE_REPO}:${tag} failed to reach Docker Hub (curl error)"
+            fi
 
             if [ "$status_code" = "204" ] || [ "$status_code" = "404" ]; then
               echo "Tag ${IMAGE_REPO}:${tag} delete status: $status_code"
