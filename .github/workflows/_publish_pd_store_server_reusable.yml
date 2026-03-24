@@ -542,8 +542,22 @@ jobs:
           return 1
         }
 
-        delete_tag_with_retry "${VERSION_TAG}-amd64"
-        delete_tag_with_retry "${VERSION_TAG}-arm64"
+        cleanup_failures=0
+
+        if ! delete_tag_with_retry "${VERSION_TAG}-amd64"; then
+          echo "Warning: failed to delete ${IMAGE_REPO}:${VERSION_TAG}-amd64"
+          cleanup_failures=1
+        fi
+
+        if ! delete_tag_with_retry "${VERSION_TAG}-arm64"; then
+          echo "Warning: failed to delete ${IMAGE_REPO}:${VERSION_TAG}-arm64"
+          cleanup_failures=1
+        fi
+
+        if [ "$cleanup_failures" -ne 0 ]; then
+          echo "Temporary arch-tag cleanup completed with warnings"
+          exit 1
+        fi
 
   update_latest_hash:
     needs: [prepare, publish_manifest]
