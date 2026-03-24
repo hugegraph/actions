@@ -481,6 +481,84 @@ jobs:
       run: |
         docker buildx imagetools inspect "${{ steps.tags.outputs.image_final }}"
 
+    - name: Delete temporary arch tags after manifest publish (${{ matrix.module }})
+      continue-on-error: true
+      env:
+        IMAGE_REPO: ${{ matrix.image_repo }}
+        VERSION_TAG: ${{ env.VERSION_TAG }}
+        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+      run: |
+        set -euo pipefail
+
+        namespace="${IMAGE_REPO%%/*}"
+        repository="${IMAGE_REPO#*/}"
+        if [ "$namespace" = "$repository" ]; then
+          echo "Invalid image repo format: $IMAGE_REPO"
+          exit 1
+        fi
+
+        login_payload="$(jq -nc --arg u "$DOCKERHUB_USERNAME" --arg p "$DOCKERHUB_PASSWORD" '{username:$u,password:$p}')"
+        auth_token="$(
+          printf '%s' "$login_payload" \
+          | curl --fail-with-body -sS -X POST "https://hub.docker.com/v2/users/login/" \
+              -H "Content-Type: application/json" \
+              --data-binary @- \
+          | jq -r '.token'
+        )"
+        if [ -z "$auth_token" ] || [ "$auth_token" = "null" ]; then
+          echo "Failed to get Docker Hub auth token"
+          exit 1
+        fi
+
+        delete_tag_with_retry() {
+          local tag="$1"
+          local attempt=1
+          local max_attempts=5
+          while [ "$attempt" -le "$max_attempts" ]; do
+            if ! status_code="$(
+              curl -sS -o /tmp/dockerhub-delete-response.txt -w "%{http_code}" -X DELETE \
+                -H "Authorization: JWT $auth_token" \
+                "https://hub.docker.com/v2/repositories/${namespace}/${repository}/tags/${tag}/"
+            )"; then
+              status_code="000"
+              echo "Delete ${IMAGE_REPO}:${tag} failed to reach Docker Hub (curl error)"
+            fi
+
+            if [ "$status_code" = "204" ] || [ "$status_code" = "404" ]; then
+              echo "Tag ${IMAGE_REPO}:${tag} delete status: $status_code"
+              return 0
+            fi
+
+            if [ "$attempt" -lt "$max_attempts" ]; then
+              echo "Delete ${IMAGE_REPO}:${tag} failed with HTTP ${status_code}, retrying (${attempt}/${max_attempts})"
+              sleep $((attempt * 5))
+            fi
+            attempt=$((attempt + 1))
+          done
+
+          echo "Delete ${IMAGE_REPO}:${tag} failed after ${max_attempts} attempts"
+          cat /tmp/dockerhub-delete-response.txt || true
+          return 1
+        }
+
+        cleanup_failures=0
+
+        if ! delete_tag_with_retry "${VERSION_TAG}-amd64"; then
+          echo "Warning: failed to delete ${IMAGE_REPO}:${VERSION_TAG}-amd64"
+          cleanup_failures=1
+        fi
+
+        if ! delete_tag_with_retry "${VERSION_TAG}-arm64"; then
+          echo "Warning: failed to delete ${IMAGE_REPO}:${VERSION_TAG}-arm64"
+          cleanup_failures=1
+        fi
+
+        if [ "$cleanup_failures" -ne 0 ]; then
+          echo "Temporary arch-tag cleanup completed with warnings"
+          exit 1
+        fi
+
   update_latest_hash:
     needs: [prepare, publish_manifest]
     if: ${{ inputs.mode == 'latest' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish_manifest.result == 'success' }}
