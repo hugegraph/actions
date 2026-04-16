@@ -1,0 +1,74 @@
+name: "Toolchain Go CI (reusable)"
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        description: "Java version used for HugeGraph environment preparation"
+        required: true
+        type: string
+      go_version:
+        description: "Go version used for the Go client test step"
+        required: true
+        type: string
+      use_stage:
+        description: "Whether to replace Maven settings with staged repo settings"
+        required: false
+        default: false
+        type: boolean
+      settings_path:
+        description: "Path to Maven settings.xml in the caller repository"
+        required: true
+        type: string
+      prepare_command:
+        description: "Environment/service preparation command(s)"
+        required: true
+        type: string
+      test_command:
+        description: "Test command(s)"
+        required: true
+        type: string
+
+jobs:
+  go-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Java ${{ inputs.java_version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java_version }}
+          distribution: 'zulu'
+          cache: 'maven'
+
+      - name: Use staged maven repo settings
+        if: ${{ inputs.use_stage }}
+        env:
+          SETTINGS_PATH: ${{ inputs.settings_path }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.m2"
+          if [ -f "$HOME/.m2/settings.xml" ]; then
+            cp "$HOME/.m2/settings.xml" /tmp/settings.xml
+          fi
+          cp -vf "$SETTINGS_PATH" "$HOME/.m2/settings.xml"
+
+      - name: Prepare env and service
+        run: |
+          set -euo pipefail
+          ${{ inputs.prepare_command }}
+
+      - name: Set up Go ${{ inputs.go_version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache: true
+
+      - name: Run test
+        run: |
+          set -euo pipefail
+          ${{ inputs.test_command }}

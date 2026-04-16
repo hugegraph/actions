@@ -36,14 +36,14 @@ standard single-image flow          pd/store/server specialized flow
 The two publishing modes behave differently:
 
 - `latest` mode
-  - scheduled or ad-hoc publish for the current default branch line (master in `apache/hugegraph`)
-  - skips work when the source hash has not changed
-  - updates the stored `LAST_*_HASH` variable after a successful publish
+    - scheduled or ad-hoc publish for the current default branch line (master in `apache/hugegraph`)
+    - skips work when the source hash has not changed
+    - updates the stored `LAST_*_HASH` variable after a successful publish
 
 - `release` mode
-  - manual publish from a versioned branch such as `release-1.7.0`
-  - always publishes when invoked
-  - derives the image tag from the release branch version
+    - manual publish from a versioned branch such as `release-1.7.0`
+    - always publishes when invoked
+    - derives the image tag from the release branch version
 
 ## Critical Path: PD/Store/Server
 
@@ -96,14 +96,14 @@ Execution note:
 Although the `latest` and `release` wrappers look similar, they encode different release semantics.
 
 - `latest` is the automatic path.
-  - It is scheduled for daily publication and can also be triggered manually.
-  - It uses the hash gate to avoid republishing unchanged sources.
-  - It usually targets the main development branch for each repository.
+    - It is scheduled for daily publication and can also be triggered manually.
+    - It uses the hash gate to avoid republishing unchanged sources.
+    - It usually targets the main development branch for each repository.
 
 - `release` is the intentional publication path.
-  - It is triggered manually.
-  - It expects a release branch and publishes that branch as a versioned image.
-  - It should run even if the source is unchanged, because the operator is explicitly asking for a release publication.
+    - It is triggered manually.
+    - It expects a release branch and publishes that branch as a versioned image.
+    - It should run even if the source is unchanged, because the operator is explicitly asking for a release publication.
 
 Most wrappers use [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).
 
@@ -144,12 +144,12 @@ When adding a new image publishing workflow, follow the same pattern:
 2. Create a matching `publish_release_*.yml` wrapper if the image also needs manual release publishing.
 3. Put shared build behavior into the appropriate reusable workflow instead of duplicating Docker or checkout logic.
 4. Put image-specific values in the wrapper via `build_matrix_json`, especially:
-   - module name
-   - Dockerfile path
-   - build context
-   - image repository name
-   - platform list
-   - optional smoke test command
+    - module name
+    - Dockerfile path
+    - build context
+    - image repository name
+    - platform list
+    - optional smoke test command
 
 Use the reusable workflow for behavior, and the wrapper for policy.
 
@@ -167,22 +167,32 @@ For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.g
 ## Current Workflow Map
 
 - Standard reusable publish path:
-  - [`.github/workflows/publish_latest_loader_image.yml`](./.github/workflows/publish_latest_loader_image.yml)
-  - [`.github/workflows/publish_release_loader_image.yml`](./.github/workflows/publish_release_loader_image.yml)
-  - [`.github/workflows/publish_latest_hubble_image.yml`](./.github/workflows/publish_latest_hubble_image.yml)
-  - [`.github/workflows/publish_release_hubble_image.yml`](./.github/workflows/publish_release_hubble_image.yml)
-  - [`.github/workflows/publish_latest_vermeer_image.yml`](./.github/workflows/publish_latest_vermeer_image.yml)
-  - [`.github/workflows/publish_release_vermeer_image.yml`](./.github/workflows/publish_release_vermeer_image.yml)
-  - [`.github/workflows/publish_latest_ai_image.yml`](./.github/workflows/publish_latest_ai_image.yml)
-  - [`.github/workflows/publish_release_ai_image.yml`](./.github/workflows/publish_release_ai_image.yml)
+    - [`.github/workflows/publish_latest_loader_image.yml`](./.github/workflows/publish_latest_loader_image.yml)
+    - [`.github/workflows/publish_release_loader_image.yml`](./.github/workflows/publish_release_loader_image.yml)
+    - [`.github/workflows/publish_latest_hubble_image.yml`](./.github/workflows/publish_latest_hubble_image.yml)
+    - [`.github/workflows/publish_release_hubble_image.yml`](./.github/workflows/publish_release_hubble_image.yml)
+    - [`.github/workflows/publish_latest_vermeer_image.yml`](./.github/workflows/publish_latest_vermeer_image.yml)
+    - [`.github/workflows/publish_release_vermeer_image.yml`](./.github/workflows/publish_release_vermeer_image.yml)
+    - [`.github/workflows/publish_latest_ai_image.yml`](./.github/workflows/publish_latest_ai_image.yml)
+    - [`.github/workflows/publish_release_ai_image.yml`](./.github/workflows/publish_release_ai_image.yml)
 
 - Dedicated reusable publish path:
-  - [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.github/workflows/publish_latest_pd_store_server_image.yml)
-  - [`.github/workflows/publish_release_pd_store_server_image.yml`](./.github/workflows/publish_release_pd_store_server_image.yml)
+    - [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.github/workflows/publish_latest_pd_store_server_image.yml)
+    - [`.github/workflows/publish_release_pd_store_server_image.yml`](./.github/workflows/publish_release_pd_store_server_image.yml)
 
 - Other legacy or special-case workflows:
-  - [`.github/workflows/publish_hugegraph_hubble.yml`](./.github/workflows/publish_hugegraph_hubble.yml)
-  - [`.github/workflows/publish_computer_image.yml`](./.github/workflows/publish_computer_image.yml)
+    - [`.github/workflows/publish_hugegraph_hubble.yml`](./.github/workflows/publish_hugegraph_hubble.yml)
+    - [`.github/workflows/publish_computer_image.yml`](./.github/workflows/publish_computer_image.yml)
+
+## Toolchain CI Design
+
+`apache/hugegraph-toolchain` follows the same reusable-workflow-plus-wrapper pattern for repository CI.
+Thin wrappers stay in the toolchain repository so each module keeps its own trigger policy and path filters, while shared setup and execution logic lives in:
+
+- [`.github/workflows/_toolchain_java_ci_reusable.yml`](./.github/workflows/_toolchain_java_ci_reusable.yml)
+- [`.github/workflows/_toolchain_go_ci_reusable.yml`](./.github/workflows/_toolchain_go_ci_reusable.yml)
+
+This keeps module-specific compile and test commands close to the source repository, while centralizing Java/Go runner setup, staged Maven settings, and optional Codecov upload behavior in `hugegraph/actions`.
 
 ## Practical Notes
 
