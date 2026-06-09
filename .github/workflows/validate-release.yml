@@ -32,7 +32,7 @@ jobs:
       USE_STAGE: 'true' # Whether to include the stage repository.
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Install JDK ${{ matrix.java_version }}
         uses: actions/setup-java@v3
         with:

@@ -80,7 +80,7 @@ jobs:
           go-version: '1.19'
           
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repository_url }}
           ref: ${{ env.repository_branch }}

@@ -164,7 +164,7 @@ jobs:
         fi
 
     - name: Checkout source
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: ${{ env.REPOSITORY_URL }}
         ref: ${{ env.SOURCE_SHA }}
@@ -305,7 +305,7 @@ jobs:
         } >> "$GITHUB_OUTPUT"
 
     - name: Checkout source (${{ matrix.module }})
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: ${{ env.REPOSITORY_URL }}
         ref: ${{ env.SOURCE_SHA }}
@@ -401,7 +401,7 @@ jobs:
         } >> "$GITHUB_OUTPUT"
 
     - name: Checkout source (${{ matrix.module }})
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: ${{ env.REPOSITORY_URL }}
         ref: ${{ env.SOURCE_SHA }}
