@@ -166,7 +166,7 @@ jobs:
         } >> "$GITHUB_OUTPUT"
 
     - name: Checkout source (${{ matrix.module }})
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: ${{ inputs.repository_url }}
         ref: ${{ needs.prepare.outputs.checkout_ref }}
