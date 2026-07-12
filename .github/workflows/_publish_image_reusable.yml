@@ -191,7 +191,7 @@ jobs:
         } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Checkout source (${{ matrix.module }})
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         repository: ${{ inputs.repository_url }}
         ref: ${{ needs.prepare.outputs.checkout_ref }}
