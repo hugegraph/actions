@@ -71,6 +71,8 @@ jobs:
       need_update: ${{ steps.prepare.outputs.need_update }}
       source_sha: ${{ steps.prepare.outputs.source_sha }}
       version_tag: ${{ steps.prepare.outputs.version_tag }}
+      cache_channel: ${{ steps.prepare.outputs.cache_channel }}
+      publish_images: ${{ steps.prepare.outputs.publish_images }}
       build_matrix_json: ${{ steps.prepare.outputs.build_matrix_json }}
     steps:
     - name: Resolve mode and source ref
@@ -96,7 +98,24 @@ jobs:
         fi
 
         if [ "$MODE" = "latest" ]; then
-          version_tag="latest"
+          if [ "$BRANCH" = "master" ]; then
+            version_tag="latest"
+            publish_images="true"
+          else
+            safe_branch="$(
+              printf '%s' "$BRANCH" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[.-]+//; s/[.-]+$//' \
+              | cut -c1-110
+            )"
+            if [ -z "$safe_branch" ]; then
+              echo "Failed to derive an image tag from branch: $BRANCH"
+              exit 1
+            fi
+            version_tag="branch-${safe_branch}"
+            publish_images="false"
+          fi
+          cache_channel="latest"
           need_update="true"
           if [ "$ENABLE_HASH_GATE" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
             need_update="false"
@@ -108,11 +127,15 @@ jobs:
             exit 1
           fi
           need_update="true"
+          cache_channel="release"
+          publish_images="true"
         fi
 
         {
           echo "source_sha=$source_sha"
           echo "version_tag=$version_tag"
+          echo "cache_channel=$cache_channel"
+          echo "publish_images=$publish_images"
           echo "need_update=$need_update"
           echo "build_matrix_json<<EOF"
           cat <<'JSON'
@@ -148,19 +171,20 @@ jobs:
 
     - name: Summarize build cache strategy
       env:
-        MODE: ${{ inputs.mode }}
+        CACHE_CHANNEL: ${{ steps.prepare.outputs.cache_channel }}
       run: |
         {
           echo "## PD / Store / Server image build"
           echo
           echo "- Cache backend: Docker Hub registry (BuildKit, mode=max)"
-          echo "- Cache channel: \`$MODE\`"
+          echo "- Cache channel: \`$CACHE_CHANNEL\`"
+          echo "- Publish images: \`${{ steps.prepare.outputs.publish_images }}\`"
           echo "- Cache writers: integration precheck and amd64 publish jobs"
           echo "- Cache reader: arm64 publish jobs"
-          echo "- PD: \`hugegraph/pd:buildcache-$MODE\`"
-          echo "- Store: \`hugegraph/store:buildcache-$MODE\`"
-          echo "- Server (HStore): \`hugegraph/server:buildcache-$MODE\`"
-          echo "- Server (standalone): \`hugegraph/hugegraph:buildcache-$MODE\`"
+          echo "- PD: \`hugegraph/pd:buildcache-$CACHE_CHANNEL\`"
+          echo "- Store: \`hugegraph/store:buildcache-$CACHE_CHANNEL\`"
+          echo "- Server (HStore): \`hugegraph/server:buildcache-$CACHE_CHANNEL\`"
+          echo "- Server (standalone): \`hugegraph/hugegraph:buildcache-$CACHE_CHANNEL\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
   integration_precheck:
@@ -211,8 +235,8 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: hg-ci/pd:precheck
-        cache-from: type=registry,ref=hugegraph/pd:buildcache-${{ inputs.mode }}
-        cache-to: type=registry,ref=hugegraph/pd:buildcache-${{ inputs.mode }},mode=max
+        cache-from: type=registry,ref=hugegraph/pd:buildcache-${{ needs.prepare.outputs.cache_channel }}
+        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/pd:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Build x86 Store image for integration check
@@ -223,8 +247,8 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: hg-ci/store:precheck
-        cache-from: type=registry,ref=hugegraph/store:buildcache-${{ inputs.mode }}
-        cache-to: type=registry,ref=hugegraph/store:buildcache-${{ inputs.mode }},mode=max
+        cache-from: type=registry,ref=hugegraph/store:buildcache-${{ needs.prepare.outputs.cache_channel }}
+        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/store:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Build x86 Server(hstore) image for integration check
@@ -235,8 +259,8 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: hg-ci/server:precheck
-        cache-from: type=registry,ref=hugegraph/server:buildcache-${{ inputs.mode }}
-        cache-to: type=registry,ref=hugegraph/server:buildcache-${{ inputs.mode }},mode=max
+        cache-from: type=registry,ref=hugegraph/server:buildcache-${{ needs.prepare.outputs.cache_channel }}
+        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/server:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Start compose stack with local images
@@ -307,7 +331,7 @@ jobs:
       SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
       VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
       MVN_ARGS: ${{ inputs.mvn_args }}
-      MODE: ${{ inputs.mode }}
+      CACHE_CHANNEL: ${{ needs.prepare.outputs.cache_channel }}
     steps:
     - name: Resolve tags (${{ matrix.module }})
       id: tags
@@ -315,7 +339,7 @@ jobs:
         IMAGE_REPO: ${{ matrix.image_repo }}
       run: |
         image_amd64="${IMAGE_REPO}:${VERSION_TAG}-amd64"
-        module_cache_ref="${IMAGE_REPO}:buildcache-${MODE}"
+        module_cache_ref="${IMAGE_REPO}:buildcache-${CACHE_CHANNEL}"
 
         {
           echo "image_amd64=$image_amd64"
@@ -350,7 +374,7 @@ jobs:
         load: true
         tags: ${{ steps.tags.outputs.image_amd64 }}
         cache-from: type=registry,ref=${{ steps.tags.outputs.module_cache_ref }}
-        cache-to: type=registry,ref=${{ steps.tags.outputs.module_cache_ref }},mode=max
+        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref={0},mode=max', steps.tags.outputs.module_cache_ref) || '' }}
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Build and push amd64 image (${{ matrix.module }})
@@ -360,10 +384,10 @@ jobs:
         context: .
         file: ${{ matrix.dockerfile }}
         platforms: linux/amd64
-        push: true
+        push: ${{ needs.prepare.outputs.publish_images == 'true' }}
         tags: ${{ steps.tags.outputs.image_amd64 }}
         cache-from: type=registry,ref=${{ steps.tags.outputs.module_cache_ref }}
-        cache-to: type=registry,ref=${{ steps.tags.outputs.module_cache_ref }},mode=max
+        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref={0},mode=max', steps.tags.outputs.module_cache_ref) || '' }}
         build-args: ${{ env.MVN_ARGS }}
 
     - name: Smoke test standalone server amd64
@@ -380,7 +404,7 @@ jobs:
         curl -fsS http://127.0.0.1:18080 >/dev/null || exit 1
 
     - name: Push tested amd64 image (${{ matrix.module }})
-      if: ${{ matrix.smoke_test }}
+      if: ${{ matrix.smoke_test && needs.prepare.outputs.publish_images == 'true' }}
       env:
         IMAGE_URL: ${{ steps.tags.outputs.image_amd64 }}
       run: |
@@ -404,7 +428,7 @@ jobs:
       SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
       VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
       MVN_ARGS: ${{ inputs.mvn_args }}
-      MODE: ${{ inputs.mode }}
+      CACHE_CHANNEL: ${{ needs.prepare.outputs.cache_channel }}
     steps:
     - name: Resolve tags (${{ matrix.module }})
       id: tags
@@ -412,7 +436,7 @@ jobs:
         IMAGE_REPO: ${{ matrix.image_repo }}
       run: |
         image_arm64="${IMAGE_REPO}:${VERSION_TAG}-arm64"
-        module_cache_ref="${IMAGE_REPO}:buildcache-${MODE}"
+        module_cache_ref="${IMAGE_REPO}:buildcache-${CACHE_CHANNEL}"
 
         {
           echo "image_arm64=$image_arm64"
@@ -446,14 +470,14 @@ jobs:
         context: .
         file: ${{ matrix.dockerfile }}
         platforms: linux/arm64
-        push: true
+        push: ${{ needs.prepare.outputs.publish_images == 'true' }}
         tags: ${{ steps.tags.outputs.image_arm64 }}
         cache-from: type=registry,ref=${{ steps.tags.outputs.module_cache_ref }}
         build-args: ${{ env.MVN_ARGS }}
 
   publish_manifest:
     needs: [prepare, publish_amd64, publish_arm64]
-    if: ${{ needs.prepare.outputs.need_update == 'true' && needs.publish_amd64.result == 'success' && needs.publish_arm64.result == 'success' }}
+    if: ${{ needs.prepare.outputs.need_update == 'true' && needs.prepare.outputs.publish_images == 'true' && needs.publish_amd64.result == 'success' && needs.publish_arm64.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -579,7 +603,7 @@ jobs:
 
   update_latest_hash:
     needs: [prepare, publish_manifest]
-    if: ${{ inputs.mode == 'latest' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish_manifest.result == 'success' }}
+    if: ${{ inputs.mode == 'latest' && inputs.branch == 'master' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish_manifest.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
     - name: Validate hash update inputs
