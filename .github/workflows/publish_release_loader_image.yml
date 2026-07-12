@@ -28,6 +28,7 @@ jobs:
             "dockerfile": "./hugegraph-loader/Dockerfile",
             "image_repo_latest": "hugegraph/loader",
             "image_repo_release": "hugegraph/loader",
+            "registry_cache_image": "hugegraph/loader:buildcache-release",
             "platforms_latest": "linux/amd64,linux/arm64",
             "platforms_release": "linux/amd64,linux/arm64",
             "smoke_test": false

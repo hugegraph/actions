@@ -19,6 +19,11 @@ on:
         description: "source branch name"
         required: true
         type: string
+      validation_only:
+        description: "build without image or cache writes"
+        required: false
+        default: false
+        type: boolean
       build_matrix_json:
         description: "build matrix JSON array"
         required: true
@@ -74,6 +79,7 @@ jobs:
       source_sha: ${{ steps.prepare.outputs.source_sha }}
       checkout_ref: ${{ steps.prepare.outputs.checkout_ref }}
       version_tag: ${{ steps.prepare.outputs.version_tag }}
+      publish_images: ${{ steps.prepare.outputs.publish_images }}
     steps:
     - name: Resolve mode and source ref
       id: prepare
@@ -82,6 +88,7 @@ jobs:
         REPOSITORY_URL: ${{ inputs.repository_url }}
         BRANCH: ${{ inputs.branch }}
         ENABLE_HASH_GATE: ${{ inputs.enable_hash_gate }}
+        VALIDATION_ONLY: ${{ inputs.validation_only }}
         LAST_HASH_VALUE: ${{ inputs.last_hash_value }}
       run: |
         set -euo pipefail
@@ -98,6 +105,10 @@ jobs:
         fi
 
         checkout_ref="$source_sha"
+        publish_images="true"
+        if [ "$VALIDATION_ONLY" = "true" ]; then
+          publish_images="false"
+        fi
 
         if [ "$MODE" = "latest" ]; then
           version_tag="latest"
@@ -118,6 +129,7 @@ jobs:
           echo "source_sha=$source_sha"
           echo "checkout_ref=$checkout_ref"
           echo "version_tag=$version_tag"
+          echo "publish_images=$publish_images"
           echo "need_update=$need_update"
         } >> "$GITHUB_OUTPUT"
 
@@ -142,6 +154,7 @@ jobs:
         PLATFORMS_LATEST: ${{ matrix.platforms_latest }}
         PLATFORMS_RELEASE: ${{ matrix.platforms_release }}
         REGISTRY_CACHE_IMAGE: ${{ matrix.registry_cache_image || '' }}
+        PUBLISH_IMAGES: ${{ needs.prepare.outputs.publish_images }}
       run: |
         set -euo pipefail
 
@@ -172,6 +185,11 @@ jobs:
           cache_backend="gha"
         fi
 
+        if [ "$PUBLISH_IMAGES" != "true" ]; then
+          cache_to_min=""
+          cache_to_max=""
+        fi
+
         {
           echo "image_url=$image_url"
           echo "platforms=$platforms"
@@ -188,6 +206,8 @@ jobs:
           echo "| Image | Platforms | Cache backend | Cache reference |"
           echo "| --- | --- | --- | --- |"
           echo "| \`${image_url}\` | \`${platforms}\` | \`${cache_backend}\` | \`${REGISTRY_CACHE_IMAGE:-$cache_scope}\` |"
+          echo
+          echo "- Publish images: \`${PUBLISH_IMAGES}\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Checkout source (${{ matrix.module }})
@@ -262,7 +282,7 @@ jobs:
         context: ${{ matrix.context }}
         file: ${{ matrix.dockerfile }}
         platforms: ${{ steps.params.outputs.platforms }}
-        push: true
+        push: ${{ needs.prepare.outputs.publish_images == 'true' }}
         tags: ${{ steps.params.outputs.image_url }}
         cache-from: ${{ steps.params.outputs.cache_from }}
         cache-to: ${{ steps.params.outputs.cache_to_max }}
@@ -275,14 +295,14 @@ jobs:
         context: ${{ matrix.context }}
         file: ${{ matrix.dockerfile }}
         platforms: ${{ steps.params.outputs.platforms }}
-        push: true
+        push: ${{ needs.prepare.outputs.publish_images == 'true' }}
         tags: ${{ steps.params.outputs.image_url }}
         cache-from: ${{ steps.params.outputs.cache_from }}
         cache-to: ${{ steps.params.outputs.cache_to_max }}
 
   update_latest_hash:
     needs: [prepare, publish]
-    if: ${{ inputs.mode == 'latest' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish.result == 'success' }}
+    if: ${{ inputs.mode == 'latest' && !inputs.validation_only && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
     - name: Validate hash update inputs
