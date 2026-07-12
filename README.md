@@ -45,6 +45,56 @@ The two publishing modes behave differently:
   - always publishes when invoked
   - derives the image tag from the release branch version
 
+## Multi-Platform Build Performance
+
+BuildKit exposes automatic platform arguments such as `BUILDPLATFORM` and
+`TARGETPLATFORM`. A multi-stage Dockerfile can pin an architecture-independent
+build stage to the native builder while leaving the runtime stage on the target
+platform:
+
+```dockerfile
+FROM --platform=$BUILDPLATFORM maven:3.9.0-eclipse-temurin-11 AS build
+RUN mvn package ...
+
+FROM eclipse-temurin:11-jre-jammy
+COPY --from=build /pkg/dist/ /app/
+```
+
+Without the explicit build platform, every unqualified `FROM` defaults to the
+requested target platform. An amd64 GitHub runner therefore executes the entire
+arm64 Maven, Node, compression, or packaging workload through QEMU. Pinning the
+portable build stage prevents emulation while the final JRE/base image remains
+architecture correct.
+
+This is a BuildKit-only feature. Buildx requires Docker Engine 19.03 or newer,
+and the automatic platform arguments are documented in the Dockerfile frontend:
+
+- [Docker multi-platform build strategies](https://docs.docker.com/build/building/multi-platform/)
+- [Dockerfile automatic platform arguments](https://docs.docker.com/reference/dockerfile/#automatic-platform-args-in-the-global-scope)
+
+Use this optimization only when the copied build output is portable or is
+explicitly cross-compiled for `TARGETOS` / `TARGETARCH`. Native C/C++, CGO,
+JNI, platform-classifier artifacts, and downloaded executables must be audited
+and covered by real target-platform smoke tests. When the output is inherently
+target-specific, use a native target runner instead of forcing `BUILDPLATFORM`.
+
+Measured on the PD/Store/Server validation run from 2026-07-12, arm64 jobs fell
+from roughly 42-44 minutes to 6.2-6.8 minutes after moving the Java build stage
+off QEMU. Cache improvements are additional to this native-build optimization.
+
+### Read-Only Branch Validation
+
+Latest wrappers that expose `latest_source_branch` use two execution policies:
+
+- default branch (`master`, or `main` for AI): publish images, export registry
+  caches, create manifests, and update the corresponding `LAST_*_HASH` variable.
+- non-default branch: force validation checks, import existing caches read-only,
+  build all configured platforms, and skip image pushes, cache exports,
+  manifests, and hash updates.
+
+This allows an upstream Dockerfile branch to be benchmarked before merge without
+changing public images or production cache state.
+
 ## Critical Path: PD/Store/Server
 
 `pd/store/server` is the most important publishing flow in this repository and uses a dedicated reusable workflow:

@@ -27,6 +27,7 @@ jobs:
             "dockerfile": "./docker/Dockerfile.llm",
             "image_repo_latest": "hugegraph/rag",
             "image_repo_release": "hugegraph/rag",
+            "registry_cache_image": "hugegraph/rag:buildcache-release",
             "platforms_latest": "linux/amd64,linux/arm64",
             "platforms_release": "linux/amd64,linux/arm64",
             "smoke_test": false
@@ -37,6 +38,7 @@ jobs:
             "dockerfile": "./docker/Dockerfile.nk",
             "image_repo_latest": "hugegraph/rag-bin",
             "image_repo_release": "hugegraph/rag-bin",
+            "registry_cache_image": "hugegraph/rag-bin:buildcache-release",
             "platforms_latest": "linux/amd64",
             "platforms_release": "linux/amd64",
             "smoke_test": false
