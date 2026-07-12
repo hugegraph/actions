@@ -141,7 +141,7 @@ jobs:
         IMAGE_REPO_RELEASE: ${{ matrix.image_repo_release }}
         PLATFORMS_LATEST: ${{ matrix.platforms_latest }}
         PLATFORMS_RELEASE: ${{ matrix.platforms_release }}
-        REGISTRY_CACHE_IMAGE: ${{ matrix.registry_cache_image }}
+        REGISTRY_CACHE_IMAGE: ${{ matrix.registry_cache_image || '' }}
       run: |
         set -euo pipefail
 
