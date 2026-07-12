@@ -172,14 +172,19 @@ jobs:
     - name: Summarize build cache strategy
       env:
         CACHE_CHANNEL: ${{ steps.prepare.outputs.cache_channel }}
+        PUBLISH_IMAGES: ${{ steps.prepare.outputs.publish_images }}
       run: |
         {
           echo "## PD / Store / Server image build"
           echo
           echo "- Cache backend: Docker Hub registry (BuildKit, mode=max)"
           echo "- Cache channel: \`$CACHE_CHANNEL\`"
-          echo "- Publish images: \`${{ steps.prepare.outputs.publish_images }}\`"
-          echo "- Cache writers: integration precheck and amd64 publish jobs"
+          echo "- Publish images: \`$PUBLISH_IMAGES\`"
+          if [ "$PUBLISH_IMAGES" = "true" ]; then
+            echo "- Cache writers: integration precheck and amd64 publish jobs"
+          else
+            echo "- Cache policy: read-only validation (no registry exports)"
+          fi
           echo "- Cache reader: arm64 publish jobs"
           echo "- PD: \`hugegraph/pd:buildcache-$CACHE_CHANNEL\`"
           echo "- Store: \`hugegraph/store:buildcache-$CACHE_CHANNEL\`"
