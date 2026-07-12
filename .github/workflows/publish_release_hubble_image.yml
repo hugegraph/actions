@@ -28,6 +28,7 @@ jobs:
             "dockerfile": "./hugegraph-hubble/Dockerfile",
             "image_repo_latest": "hugegraph/hubble",
             "image_repo_release": "hugegraph/hubble",
+            "registry_cache_image": "hugegraph/hubble:buildcache",
             "platforms_latest": "linux/amd64,linux/arm64",
             "platforms_release": "linux/amd64,linux/arm64",
             "smoke_test": false

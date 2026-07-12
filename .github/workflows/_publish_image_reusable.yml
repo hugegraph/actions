@@ -141,6 +141,7 @@ jobs:
         IMAGE_REPO_RELEASE: ${{ matrix.image_repo_release }}
         PLATFORMS_LATEST: ${{ matrix.platforms_latest }}
         PLATFORMS_RELEASE: ${{ matrix.platforms_release }}
+        REGISTRY_CACHE_IMAGE: ${{ matrix.registry_cache_image }}
       run: |
         set -euo pipefail
 
@@ -159,11 +160,35 @@ jobs:
         image_url="${image_repo}:${VERSION_TAG}"
         cache_scope="${COMPONENT}-${MODULE}"
 
+        if [ -n "$REGISTRY_CACHE_IMAGE" ]; then
+          cache_from="type=registry,ref=${REGISTRY_CACHE_IMAGE}"
+          cache_to_min="type=registry,ref=${REGISTRY_CACHE_IMAGE},mode=min"
+          cache_to_max="type=registry,ref=${REGISTRY_CACHE_IMAGE},mode=max"
+          cache_backend="registry"
+        else
+          cache_from="type=gha,scope=${cache_scope}"
+          cache_to_min="type=gha,scope=${cache_scope},mode=min"
+          cache_to_max="type=gha,scope=${cache_scope},mode=max"
+          cache_backend="gha"
+        fi
+
         {
           echo "image_url=$image_url"
           echo "platforms=$platforms"
           echo "cache_scope=$cache_scope"
+          echo "cache_from=$cache_from"
+          echo "cache_to_min=$cache_to_min"
+          echo "cache_to_max=$cache_to_max"
+          echo "cache_backend=$cache_backend"
         } >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### Build parameters: ${MODULE}"
+          echo
+          echo "| Image | Platforms | Cache backend | Cache reference |"
+          echo "| --- | --- | --- | --- |"
+          echo "| \`${image_url}\` | \`${platforms}\` | \`${cache_backend}\` | \`${REGISTRY_CACHE_IMAGE:-$cache_scope}\` |"
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Checkout source (${{ matrix.module }})
       uses: actions/checkout@v6
@@ -196,8 +221,8 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: ${{ steps.params.outputs.image_url }}
-        cache-from: type=gha,scope=${{ steps.params.outputs.cache_scope }}
-        cache-to: type=gha,scope=${{ steps.params.outputs.cache_scope }},mode=min
+        cache-from: ${{ steps.params.outputs.cache_from }}
+        cache-to: ${{ steps.params.outputs.cache_to_min }}
         build-args: ${{ inputs.mvn_args }}
 
     - name: Build x86 image for smoke test (${{ matrix.module }})
@@ -209,8 +234,8 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: ${{ steps.params.outputs.image_url }}
-        cache-from: type=gha,scope=${{ steps.params.outputs.cache_scope }}
-        cache-to: type=gha,scope=${{ steps.params.outputs.cache_scope }},mode=min
+        cache-from: ${{ steps.params.outputs.cache_from }}
+        cache-to: ${{ steps.params.outputs.cache_to_min }}
 
     - name: Run smoke test (${{ matrix.module }})
       if: ${{ matrix.smoke_test }}
@@ -239,8 +264,8 @@ jobs:
         platforms: ${{ steps.params.outputs.platforms }}
         push: true
         tags: ${{ steps.params.outputs.image_url }}
-        cache-from: type=gha,scope=${{ steps.params.outputs.cache_scope }}
-        cache-to: type=gha,scope=${{ steps.params.outputs.cache_scope }},mode=max
+        cache-from: ${{ steps.params.outputs.cache_from }}
+        cache-to: ${{ steps.params.outputs.cache_to_max }}
         build-args: ${{ inputs.mvn_args }}
 
     - name: Build and push image (${{ matrix.module }})
@@ -252,8 +277,8 @@ jobs:
         platforms: ${{ steps.params.outputs.platforms }}
         push: true
         tags: ${{ steps.params.outputs.image_url }}
-        cache-from: type=gha,scope=${{ steps.params.outputs.cache_scope }}
-        cache-to: type=gha,scope=${{ steps.params.outputs.cache_scope }},mode=max
+        cache-from: ${{ steps.params.outputs.cache_from }}
+        cache-to: ${{ steps.params.outputs.cache_to_max }}
 
   update_latest_hash:
     needs: [prepare, publish]
