@@ -78,9 +78,16 @@ JNI, platform-classifier artifacts, and downloaded executables must be audited
 and covered by real target-platform smoke tests. When the output is inherently
 target-specific, use a native target runner instead of forcing `BUILDPLATFORM`.
 
-Measured on the PD/Store/Server validation run from 2026-07-12, arm64 jobs fell
-from roughly 42-44 minutes to 6.2-6.8 minutes after moving the Java build stage
-off QEMU. Cache improvements are additional to this native-build optimization.
+Measured on read-only validation runs from 2026-07-12:
+
+- PD/Store/Server arm64 jobs fell from roughly 42-44 minutes to 6.2-6.8
+  minutes.
+- Hubble's multi-platform job fell from 147.5 minutes to 8.8 minutes.
+- Loader's multi-platform run fell from roughly 30-40 minutes to 2.9 minutes.
+- Vermeer's multi-platform job fell from 13.3 minutes to 1.9 minutes.
+
+These results primarily come from moving portable build work off QEMU. Cache
+improvements are additional to the native-build or cross-compilation gains.
 
 ### Read-Only Branch Validation
 
