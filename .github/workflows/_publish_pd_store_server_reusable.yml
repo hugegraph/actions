@@ -536,7 +536,12 @@ jobs:
     - name: Dump compose logs on failure
       if: ${{ failure() }}
       run: |
-        docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml ps || true
+        if [ -n "${COMPOSE_FILE:-}" ] && [ -f /tmp/docker-compose.ci.override.yml ]; then
+          docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml ps || true
+          docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
+        else
+          echo "Compose stack was not started; COMPOSE_FILE or CI override is unavailable"
+        fi
         docker stats --no-stream hg-pd hg-store hg-server || true
         for container in hg-pd hg-store hg-server; do
           docker inspect --format '{{json .State.Health}}' "$container" || true
@@ -547,18 +552,21 @@ jobs:
             cat "$artifact"
           fi
         done
-        docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
 
     - name: Stop compose stack
       if: ${{ always() }}
       run: |
         set -euo pipefail
 
-        docker compose \
-          -p hg-ci-precheck \
-          -f "$COMPOSE_FILE" \
-          -f /tmp/docker-compose.ci.override.yml \
-          down -v --remove-orphans
+        if [ -n "${COMPOSE_FILE:-}" ] && [ -f /tmp/docker-compose.ci.override.yml ]; then
+          docker compose \
+            -p hg-ci-precheck \
+            -f "$COMPOSE_FILE" \
+            -f /tmp/docker-compose.ci.override.yml \
+            down -v --remove-orphans
+        else
+          echo "Compose stack was not started; skipping compose down"
+        fi
 
         leftover_containers="$(docker ps -aq --filter label=com.docker.compose.project=hg-ci-precheck)"
         leftover_networks="$(docker network ls -q --filter label=com.docker.compose.project=hg-ci-precheck)"
