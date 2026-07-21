@@ -101,6 +101,22 @@ changing public images or production cache state.
 `pd/store/server` is the most important publishing flow in this repository and uses a dedicated reusable workflow:
 [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml).
 
+The strict integration precheck builds local amd64 PD, Store, and HStore Server
+images, starts the upstream `docker/docker-compose.dev.yml` topology with
+`pull_policy: never`, and runs a functional graph check before any image is
+published. Compatible source revisions that have the same service contract but
+only contain `docker/docker-compose.yml` use that legacy file as a fallback. The
+check executes the Server image's bundled
+`/hugegraph-server/scripts/example.groovy` file, verifies the six-vertex,
+six-edge sample graph, then performs separate Gremlin read, create, update, and
+delete requests. The final query must return to the original 6V/6E baseline.
+
+The precheck override constrains the three JVMs and Store buffers for a small
+CI workload. PD and Store are limited to 1 GiB each, Server to 1.5 GiB, while
+heap, direct memory, RocksDB, Raft, and worker queues use a low-memory test
+profile. These settings are functional-test limits, not production guidance or
+a performance baseline.
+
 ```text
                source branch (master / release-x.y.z)
                               |
@@ -110,7 +126,7 @@ changing public images or production cache state.
                               |
                               v
                   integration_precheck (optional)
-            (compose health check for pd/store/server-hstore)
+       (low-memory compose + bundled example graph + Gremlin CRUD)
                               |
                               v
                    publish_amd64 (matrix x4 modules)
@@ -178,11 +194,16 @@ Reusable workflows are the real implementation layer.
 `_publish_pd_store_server_reusable.yml` handles the pd/store/server flow:
 
 - shared source SHA resolution and latest hash gate
-- strict integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
+- strict low-memory integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
+- import of the Server image's bundled `example.groovy` graph and Gremlin CRUD validation
 - staged image publication with `*-amd64` then `*-arm64`
 - manifest merge to final tag (`latest` or release version)
 - remove temporary `*-amd64` and `*-arm64` tags after successful manifest publish
 - standalone server smoke test for `hugegraph/hugegraph`
+
+The current precheck intentionally uses a 1 PD + 1 Store + 1 Server topology so
+it fits standard GitHub-hosted runners. A full 3 PD + 3 Store + 3 Server compose
+gate remains a TODO for a larger runner or a reliable lower-resource simulation.
 
 Wrapper workflows provide the source repository, branch, and mode-specific inputs.
 Standard wrappers may also pass `build_matrix_json`, while the pd/store/server matrix is defined inside `_publish_pd_store_server_reusable.yml`.

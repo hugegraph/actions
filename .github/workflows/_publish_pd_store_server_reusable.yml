@@ -270,32 +270,184 @@ jobs:
 
     - name: Start compose stack with local images
       run: |
-        if [ ! -f "docker/docker-compose.yml" ]; then
-          echo "ERROR: docker/docker-compose.yml not found in $REPOSITORY_URL@$SOURCE_SHA"
-          echo "Please update the compose file path in this workflow."
+        if [ -f "docker/docker-compose.dev.yml" ]; then
+          compose_file="docker/docker-compose.dev.yml"
+        elif [ -f "docker/docker-compose.yml" ]; then
+          compose_file="docker/docker-compose.yml"
+          echo "WARN: docker/docker-compose.dev.yml is unavailable; using legacy docker/docker-compose.yml"
+        else
+          echo "ERROR: no supported compose file found in $REPOSITORY_URL@$SOURCE_SHA"
+          echo "Expected docker/docker-compose.dev.yml or docker/docker-compose.yml."
           exit 1
         fi
+        echo "COMPOSE_FILE=$compose_file" >> "$GITHUB_ENV"
+
+        cat > /tmp/hg-ci-patch-server-config.sh <<'PATCH_SERVER'
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        set_property() {
+          local file="$1" key="$2" value="$3" escaped
+          escaped=${key//./\.}
+          if grep -qE "^[[:space:]]*${escaped}[[:space:]]*=" "$file"; then
+            sed -E -i "s|^[[:space:]]*${escaped}[[:space:]]*=.*|${key}=${value}|" "$file"
+          else
+            printf '%s=%s\n' "$key" "$value" >> "$file"
+          fi
+        }
+
+        set_yaml_scalar() {
+          local file="$1" key="$2" value="$3"
+          if grep -qE "^[[:space:]]*${key}:" "$file"; then
+            sed -E -i "s|^([[:space:]]*)${key}:.*|\1${key}: ${value}|" "$file"
+          else
+            printf '%s: %s\n' "$key" "$value" >> "$file"
+          fi
+        }
+
+        set_property ./conf/rest-server.properties batch.max_write_threads 4
+        set_property ./conf/rest-server.properties restserver.min_free_memory 32
+        set_yaml_scalar ./conf/gremlin-server.yaml threadPoolWorker 4
+        set_yaml_scalar ./conf/gremlin-server.yaml gremlinPool 4
+
+        echo "Applied CI Server resource configuration"
+        exec ./docker-entrypoint.sh
+        PATCH_SERVER
+        chmod 755 /tmp/hg-ci-patch-server-config.sh
 
         cat > /tmp/docker-compose.ci.override.yml <<COMPOSE_OVERRIDE
         services:
           pd:
             image: hg-ci/pd:precheck
+            container_name: hg-pd
             pull_policy: never
+            mem_limit: 1024m
+            cpus: 2.0
+            environment:
+              JAVA_OPTS: >-
+                -Xms128m -Xmx128m
+                -XX:ActiveProcessorCount=2
+                -XX:MaxMetaspaceSize=192m
+                -XX:MaxDirectMemorySize=128m
+                -XX:+UseContainerSupport
+                -Dlog4j2.asyncLoggerConfigRingBufferSize=8192
+                -DAsyncLoggerConfig.RingBufferSize=8192
+                -Dthread.pool.grpc.core=8
+                -Dthread.pool.grpc.max=32
+                -Dthread.pool.grpc.queue=512
+                -Djob.interruptableThreadPool.core=1
+                -Djob.interruptableThreadPool.max=8
+                -Djob.interruptableThreadPool.queue=256
+                -Djob.uninterruptibleThreadPool.core=0
+                -Djob.uninterruptibleThreadPool.max=4
+                -Djob.uninterruptibleThreadPool.queue=128
+                -Dpartition.default-shard-count=1
+                -Dpartition.store-max-shard-count=12
           store:
             image: hg-ci/store:precheck
+            container_name: hg-store
             pull_policy: never
+            mem_limit: 1024m
+            cpus: 2.0
+            environment:
+              JAVA_OPTS: >-
+                -Xms128m -Xmx128m
+                -XX:ActiveProcessorCount=2
+                -XX:MaxMetaspaceSize=192m
+                -XX:MaxDirectMemorySize=128m
+                -XX:+UseContainerSupport
+                -Dlog4j2.asyncLoggerConfigRingBufferSize=8192
+                -DAsyncLoggerConfig.RingBufferSize=8192
+                -Drocksdb.total_memory_size=134217728
+                -Drocksdb.write_buffer_size=2097152
+                -Drocksdb.min_write_buffer_number_to_merge=2
+                -Dthread.pool.grpc.core=8
+                -Dthread.pool.grpc.max=32
+                -Dthread.pool.grpc.queue=512
+                -Dthread.pool.scan.core=4
+                -Dthread.pool.scan.max=16
+                -Dthread.pool.scan.queue=256
+                -Djob.interruptableThreadPool.core=2
+                -Djob.interruptableThreadPool.max=8
+                -Djob.interruptableThreadPool.queue=256
+                -Djob.uninterruptibleThreadPool.core=0
+                -Djob.uninterruptibleThreadPool.max=4
+                -Djob.uninterruptibleThreadPool.queue=128
+                -Dquery.push-down.threads=8
+                -Dquery.push-down.fetch_batch=1000
+                -Dquery.push-down.fetch_timeout=30000
+                -Dquery.push-down.memory_limit_count=10000
+                -Dquery.push-down.index_size_limit_count=10000
+                -Draft.disruptorBufferSize=512
+                -Draft.metrics=false
+                -Draft.maxReplicatorInflightMsgs=32
+                -Draft.maxEntriesSize=64
+                -Draft.maxBodySize=262144
           server:
             image: hg-ci/server:precheck
+            container_name: hg-server
             pull_policy: never
+            mem_limit: 1536m
+            cpus: 4.0
+            entrypoint:
+              - /usr/bin/dumb-init
+              - "--"
+              - /opt/hg-ci/patch-server-config.sh
+            environment:
+              JAVA_OPTS: >-
+                -Xms256m -Xmx384m
+                -XX:ActiveProcessorCount=4
+                -XX:MaxMetaspaceSize=256m
+                -XX:MaxDirectMemorySize=128m
+                -XX:+UseContainerSupport
+                -Dlog4j2.asyncLoggerConfigRingBufferSize=8192
+                -DAsyncLoggerConfig.RingBufferSize=8192
+            volumes:
+              - type: bind
+                source: /tmp/hg-ci-patch-server-config.sh
+                target: /opt/hg-ci/patch-server-config.sh
+                read_only: true
         COMPOSE_OVERRIDE
 
         docker compose \
           -p hg-ci-precheck \
-          -f docker/docker-compose.yml \
+          -f "$compose_file" \
           -f /tmp/docker-compose.ci.override.yml \
           up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
 
-        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml ps
+        docker compose -p hg-ci-precheck -f "$compose_file" -f /tmp/docker-compose.ci.override.yml ps
+
+    - name: Verify CI resource limits
+      run: |
+        set -euo pipefail
+
+        assert_memory_limit() {
+          local container="$1" expected_bytes="$2" actual_bytes
+          actual_bytes="$(docker inspect --format '{{.HostConfig.Memory}}' "$container")"
+          if [ "$actual_bytes" != "$expected_bytes" ]; then
+            echo "Unexpected memory limit for ${container}: expected ${expected_bytes}, got ${actual_bytes}"
+            exit 1
+          fi
+          echo "${container} memory limit: ${actual_bytes} bytes"
+        }
+
+        assert_memory_limit hg-pd 1073741824
+        assert_memory_limit hg-store 1073741824
+        assert_memory_limit hg-server 1610612736
+
+        for container in hg-pd hg-store hg-server; do
+          docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" \
+            | grep '^JAVA_OPTS='
+          docker exec "$container" bash -lc "ps -eo args | grep '[j]ava'"
+        done
+        docker exec hg-server grep -E \
+          '^(batch.max_write_threads|restserver.min_free_memory)=' \
+          /hugegraph-server/conf/rest-server.properties
+        docker exec hg-server grep -E \
+          '^[[:space:]]*(threadPoolWorker|gremlinPool):' \
+          /hugegraph-server/conf/gremlin-server.yaml
+
+        docker stats --no-stream hg-pd hg-store hg-server
 
     - name: Verify integration endpoints
       run: |
@@ -303,19 +455,122 @@ jobs:
         curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8520/v1/health" >/dev/null
         curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8080/versions" >/dev/null
 
+    - name: Import bundled example graph
+      run: |
+        set -euo pipefail
+
+        docker exec hg-server test -r /hugegraph-server/scripts/example.groovy
+        docker exec hg-server bash -lc \
+          'cd /hugegraph-server && bin/gremlin-console.sh -- -e scripts/example.groovy' \
+          | tee /tmp/hg-ci-example-import.log
+
+        grep -Fq '>>>> query all vertices: size=6' /tmp/hg-ci-example-import.log
+        grep -Fq '>>>> query all edges: size=6' /tmp/hg-ci-example-import.log
+
+    - name: Verify bundled graph with Gremlin CRUD
+      env:
+        CI_VERTEX_NAME: hg-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+
+        gremlin_request() {
+          local label="$1" script="$2" payload response_file
+          response_file="/tmp/hg-ci-gremlin-${label}.json"
+          payload="$(
+            jq -nc --arg gremlin "$script" \
+              '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",aliases:{graph:"DEFAULT-hugegraph",g:"__g_DEFAULT-hugegraph"}}'
+          )"
+          curl --fail-with-body -sS \
+            --compressed \
+            --connect-timeout 3 \
+            --max-time 30 \
+            -H 'Content-Type: application/json' \
+            --data-binary "$payload" \
+            http://127.0.0.1:8080/gremlin \
+            | tee "$response_file"
+          jq -e '.status.code == 200' "$response_file" >/dev/null
+        }
+
+        baseline_script="[[vertices:g.V().count().next(),edges:g.E().count().next(),names:g.V().values('name').order().toList(),markoCreated:g.V().has('person','name','marko').out('created').values('name').order().toList()]]"
+        gremlin_request baseline "$baseline_script"
+        jq -e '
+          .result.data[0].vertices == 6 and
+          .result.data[0].edges == 6 and
+          .result.data[0].names == ["josh","lop","marko","peter","ripple","vadas"] and
+          .result.data[0].markoCreated == ["lop"]
+        ' /tmp/hg-ci-gremlin-baseline.json >/dev/null
+
+        create_script="ci=graph.addVertex(T.label,'person','name','${CI_VERTEX_NAME}','age',40,'city','CI');marko=g.V().has('person','name','marko').next();marko.addEdge('knows',ci,'date','ci','weight',0.1d);graph.tx().commit();'${CI_VERTEX_NAME}'"
+        gremlin_request create "$create_script"
+        jq -e --arg name "$CI_VERTEX_NAME" '.result.data == [$name]' \
+          /tmp/hg-ci-gremlin-create.json >/dev/null
+
+        read_created_script="[[vertices:g.V().count().next(),edges:g.E().count().next(),matches:g.V().has('person','name','marko').out('knows').has('name','${CI_VERTEX_NAME}').count().next()]]"
+        gremlin_request read-created "$read_created_script"
+        jq -e '
+          .result.data[0].vertices == 7 and
+          .result.data[0].edges == 7 and
+          .result.data[0].matches == 1
+        ' /tmp/hg-ci-gremlin-read-created.json >/dev/null
+
+        update_script="g.V().has('person','name','${CI_VERTEX_NAME}').property('age',41).iterate();graph.tx().commit();g.V().has('person','name','${CI_VERTEX_NAME}').values('age').next()"
+        gremlin_request update "$update_script"
+        jq -e '.result.data == [41]' /tmp/hg-ci-gremlin-update.json >/dev/null
+
+        delete_script="ci=g.V().has('person','name','${CI_VERTEX_NAME}').next();g.V(ci).bothE().drop().iterate();g.V(ci).drop().iterate();graph.tx().commit();[[vertices:g.V().count().next(),edges:g.E().count().next()]]"
+        gremlin_request delete "$delete_script"
+        jq -e '
+          .result.data[0].vertices == 6 and
+          .result.data[0].edges == 6
+        ' /tmp/hg-ci-gremlin-delete.json >/dev/null
+
+        gremlin_request final "$baseline_script"
+        jq -e '
+          .result.data[0].vertices == 6 and
+          .result.data[0].edges == 6 and
+          .result.data[0].names == ["josh","lop","marko","peter","ripple","vadas"]
+        ' /tmp/hg-ci-gremlin-final.json >/dev/null
+
+        docker stats --no-stream hg-pd hg-store hg-server
+
     - name: Dump compose logs on failure
       if: ${{ failure() }}
       run: |
-        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
+        docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml ps || true
+        docker stats --no-stream hg-pd hg-store hg-server || true
+        for container in hg-pd hg-store hg-server; do
+          docker inspect --format '{{json .State.Health}}' "$container" || true
+        done
+        for artifact in /tmp/hg-ci-example-import.log /tmp/hg-ci-gremlin-*.json; do
+          if [ -f "$artifact" ]; then
+            echo "===== ${artifact} ====="
+            cat "$artifact"
+          fi
+        done
+        docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
 
     - name: Stop compose stack
       if: ${{ always() }}
       run: |
+        set -euo pipefail
+
         docker compose \
           -p hg-ci-precheck \
-          -f docker/docker-compose.yml \
+          -f "$COMPOSE_FILE" \
           -f /tmp/docker-compose.ci.override.yml \
-          down -v --remove-orphans || true
+          down -v --remove-orphans
+
+        leftover_containers="$(docker ps -aq --filter label=com.docker.compose.project=hg-ci-precheck)"
+        leftover_networks="$(docker network ls -q --filter label=com.docker.compose.project=hg-ci-precheck)"
+        leftover_volumes="$(docker volume ls -q --filter label=com.docker.compose.project=hg-ci-precheck)"
+        if [ -n "$leftover_containers$leftover_networks$leftover_volumes" ]; then
+          echo "Compose cleanup left resources behind"
+          docker ps -a --filter label=com.docker.compose.project=hg-ci-precheck
+          docker network ls --filter label=com.docker.compose.project=hg-ci-precheck
+          docker volume ls --filter label=com.docker.compose.project=hg-ci-precheck
+          exit 1
+        fi
+        echo "Compose cleanup removed all project containers, networks, and volumes"
 
     - name: Post-check cleanup
       if: ${{ always() }}
