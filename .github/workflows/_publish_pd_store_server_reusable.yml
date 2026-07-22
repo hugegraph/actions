@@ -203,15 +203,16 @@ jobs:
           echo "- Publish images: \`$PUBLISH_IMAGES\`"
           echo "- Dry run: \`$DRY_RUN\`"
           if [ "$PUBLISH_IMAGES" = "true" ]; then
-            echo "- Cache writer: amd64 candidate job"
+          echo "- Cache writer: tested multi-platform candidate job"
           else
             echo "- Cache policy: read-only validation (no registry exports)"
           fi
-          echo "- ARM strategy: one x86 job, shared build stage, QEMU target-image stages"
+          echo "- Build strategy: one x86 job loads amd64/arm64 images into the containerd image store"
+          echo "- Test platform: locally loaded amd64 variants from the final multi-platform tags"
           echo "- Shared per-module caches: \`buildcache-$CACHE_CHANNEL\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
-  build_test_publish_amd64:
+  build_test_publish_multiarch:
     needs: prepare
     if: ${{ needs.prepare.outputs.need_update == 'true' }}
     runs-on: ubuntu-latest
@@ -221,10 +222,10 @@ jobs:
       MVN_ARGS: ${{ inputs.mvn_args }}
       WAIT_TIMEOUT_SEC: ${{ inputs.wait_timeout_sec }}
       VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
-      PD_IMAGE: hugegraph/pd:${{ needs.prepare.outputs.version_tag }}-amd64
-      STORE_IMAGE: hugegraph/store:${{ needs.prepare.outputs.version_tag }}-amd64
-      HSTORE_IMAGE: hugegraph/server:${{ needs.prepare.outputs.version_tag }}-amd64
-      STANDALONE_IMAGE: hugegraph/hugegraph:${{ needs.prepare.outputs.version_tag }}-amd64
+      PD_IMAGE: hugegraph/pd:${{ needs.prepare.outputs.version_tag }}
+      STORE_IMAGE: hugegraph/store:${{ needs.prepare.outputs.version_tag }}
+      HSTORE_IMAGE: hugegraph/server:${{ needs.prepare.outputs.version_tag }}
+      STANDALONE_IMAGE: hugegraph/hugegraph:${{ needs.prepare.outputs.version_tag }}
     steps:
     - name: Validate wait timeout
       run: |
@@ -239,6 +240,19 @@ jobs:
         repository: ${{ env.REPOSITORY_URL }}
         ref: ${{ env.SOURCE_SHA }}
         fetch-depth: 2
+
+    - name: Set up Docker with containerd image store
+      uses: docker/setup-docker-action@v5
+      with:
+        daemon-config: |
+          {
+            "features": {
+              "containerd-snapshotter": true
+            }
+          }
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v4
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
@@ -256,53 +270,62 @@ jobs:
         docker system prune -af || true
         docker builder prune -af || true
 
-    - name: Build x86 PD image for integration check
+    - name: Build multi-platform PD candidate
       uses: docker/build-push-action@v7
       with:
         context: .
         file: ./hugegraph-pd/Dockerfile
-        platforms: linux/amd64
+        platforms: linux/amd64,linux/arm64
         load: true
         tags: ${{ env.PD_IMAGE }}
         cache-from: type=registry,ref=hugegraph/pd:buildcache-${{ needs.prepare.outputs.cache_channel }}
         cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/pd:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Build x86 Store image for integration check
+    - name: Build multi-platform Store candidate
       uses: docker/build-push-action@v7
       with:
         context: .
         file: ./hugegraph-store/Dockerfile
-        platforms: linux/amd64
+        platforms: linux/amd64,linux/arm64
         load: true
         tags: ${{ env.STORE_IMAGE }}
         cache-from: type=registry,ref=hugegraph/store:buildcache-${{ needs.prepare.outputs.cache_channel }}
         cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/store:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Build x86 Server(hstore) image for integration check
+    - name: Build multi-platform Server(hstore) candidate
       uses: docker/build-push-action@v7
       with:
         context: .
         file: ./hugegraph-server/Dockerfile-hstore
-        platforms: linux/amd64
+        platforms: linux/amd64,linux/arm64
         load: true
         tags: ${{ env.HSTORE_IMAGE }}
         cache-from: type=registry,ref=hugegraph/server:buildcache-${{ needs.prepare.outputs.cache_channel }}
         cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/server:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
         build-args: ${{ env.MVN_ARGS }}
 
-    - name: Build x86 standalone Server candidate
+    - name: Build multi-platform standalone Server candidate
       uses: docker/build-push-action@v7
       with:
         context: .
         file: ./hugegraph-server/Dockerfile
-        platforms: linux/amd64
+        platforms: linux/amd64,linux/arm64
         load: true
         tags: ${{ env.STANDALONE_IMAGE }}
         cache-from: type=registry,ref=hugegraph/hugegraph:buildcache-${{ needs.prepare.outputs.cache_channel }}
         cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/hugegraph:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
         build-args: ${{ env.MVN_ARGS }}
+
+    - name: Verify locally loaded platform variants
+      run: |
+        set -euo pipefail
+        for image in "$PD_IMAGE" "$STORE_IMAGE" "$HSTORE_IMAGE" "$STANDALONE_IMAGE"; do
+          docker image inspect --platform linux/amd64 "$image" >/dev/null
+          docker image inspect --platform linux/arm64 "$image" >/dev/null
+          echo "Loaded amd64 and arm64 variants: ${image}"
+        done
 
     - name: Start compose stack with local images
       if: ${{ inputs.strict_mode }}
@@ -640,13 +663,12 @@ jobs:
         docker logs hg-ci-standalone
         exit 1
 
-    - name: Push tested amd64 candidates
+    - name: Push tested multi-platform candidates
       if: ${{ success() && needs.prepare.outputs.publish_images == 'true' }}
       run: |
         set -euo pipefail
         for image in "$PD_IMAGE" "$STORE_IMAGE" "$HSTORE_IMAGE" "$STANDALONE_IMAGE"; do
-          image_id="$(docker image inspect --format '{{.Id}}' "$image")"
-          echo "Pushing tested candidate ${image} (${image_id})"
+          echo "Pushing tested multi-platform candidate ${image}"
           docker push "$image"
         done
 
@@ -660,186 +682,9 @@ jobs:
         docker system prune -af || true
         docker builder prune -af || true
 
-  publish_arm64:
-    needs: [prepare, build_test_publish_amd64]
-    if: ${{ needs.prepare.outputs.need_update == 'true' && needs.build_test_publish_amd64.result == 'success' }}
-    runs-on: ubuntu-latest
-    env:
-      REPOSITORY_URL: ${{ inputs.repository_url }}
-      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-      VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
-      MVN_ARGS: ${{ inputs.mvn_args }}
-      CACHE_CHANNEL: ${{ needs.prepare.outputs.cache_channel }}
-      BUILD_MATRIX_JSON: ${{ needs.prepare.outputs.build_matrix_json }}
-    steps:
-    - name: Checkout source
-      uses: actions/checkout@v7
-      with:
-        repository: ${{ env.REPOSITORY_URL }}
-        ref: ${{ env.SOURCE_SHA }}
-        fetch-depth: 2
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
-      with:
-        version: latest
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v4
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Build arm64 images sequentially
-      env:
-        PUBLISH_IMAGES: ${{ needs.prepare.outputs.publish_images }}
-      run: |
-        set -euo pipefail
-
-        output_flags=(--output type=cacheonly)
-        if [ "$PUBLISH_IMAGES" = "true" ]; then
-          output_flags=(--push)
-        fi
-
-        while IFS= read -r item; do
-          module="$(jq -r '.module' <<< "$item")"
-          image_repo="$(jq -r '.image_repo' <<< "$item")"
-          dockerfile="$(jq -r '.dockerfile' <<< "$item")"
-          image_arm64="${image_repo}:${VERSION_TAG}-arm64"
-          cache_ref="${image_repo}:buildcache-${CACHE_CHANNEL}"
-
-          echo "Building ${module}: ${image_arm64}"
-          build_command=(
-            docker buildx build
-            --file "$dockerfile"
-            --platform linux/arm64
-            --tag "$image_arm64"
-            --cache-from "type=registry,ref=${cache_ref}"
-          )
-          while IFS= read -r build_arg; do
-            if [ -n "$build_arg" ]; then
-              build_command+=(--build-arg "$build_arg")
-            fi
-          done <<< "$MVN_ARGS"
-          build_command+=("${output_flags[@]}" .)
-          "${build_command[@]}"
-        done < <(jq -c '.[]' <<< "$BUILD_MATRIX_JSON")
-
-  publish_manifest:
-    needs: [prepare, build_test_publish_amd64, publish_arm64]
-    if: ${{ needs.prepare.outputs.need_update == 'true' && needs.prepare.outputs.publish_images == 'true' && needs.build_test_publish_amd64.result == 'success' && needs.publish_arm64.result == 'success' }}
-    runs-on: ubuntu-latest
-    env:
-      VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
-      BUILD_MATRIX_JSON: ${{ needs.prepare.outputs.build_matrix_json }}
-    steps:
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
-      with:
-        version: latest
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v4
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Create and inspect multi-arch manifests
-      run: |
-        set -euo pipefail
-        while IFS= read -r image_repo; do
-          image_final="${image_repo}:${VERSION_TAG}"
-          image_amd64="${image_repo}:${VERSION_TAG}-amd64"
-          image_arm64="${image_repo}:${VERSION_TAG}-arm64"
-          docker buildx imagetools create \
-            --tag "$image_final" \
-            "$image_amd64" \
-            "$image_arm64"
-          docker buildx imagetools inspect "$image_final"
-        done < <(jq -r '.[].image_repo' <<< "$BUILD_MATRIX_JSON")
-
-    - name: Delete temporary arch tags after manifest publish
-      continue-on-error: true
-      env:
-        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
-      run: |
-        set -euo pipefail
-
-        login_payload="$(jq -nc --arg u "$DOCKERHUB_USERNAME" --arg p "$DOCKERHUB_PASSWORD" '{username:$u,password:$p}')"
-        auth_token="$(
-          printf '%s' "$login_payload" \
-          | curl --fail-with-body -sS -X POST "https://hub.docker.com/v2/users/login/" \
-              -H "Content-Type: application/json" \
-              --data-binary @- \
-          | jq -r '.token'
-        )"
-        if [ -z "$auth_token" ] || [ "$auth_token" = "null" ]; then
-          echo "Failed to get Docker Hub auth token"
-          exit 1
-        fi
-
-        delete_tag_with_retry() {
-          local image_repo="$1" tag="$2" namespace repository
-          local attempt=1
-          local max_attempts=5
-          namespace="${image_repo%%/*}"
-          repository="${image_repo#*/}"
-          if [ "$namespace" = "$repository" ]; then
-            echo "Invalid image repo format: $image_repo"
-            return 1
-          fi
-          while [ "$attempt" -le "$max_attempts" ]; do
-            if ! status_code="$(
-              curl -sS -o /tmp/dockerhub-delete-response.txt -w "%{http_code}" -X DELETE \
-                -H "Authorization: JWT $auth_token" \
-                "https://hub.docker.com/v2/repositories/${namespace}/${repository}/tags/${tag}/"
-            )"; then
-              status_code="000"
-              echo "Delete ${image_repo}:${tag} failed to reach Docker Hub (curl error)"
-            fi
-
-            if [ "$status_code" = "204" ] || [ "$status_code" = "404" ]; then
-              echo "Tag ${image_repo}:${tag} delete status: $status_code"
-              return 0
-            fi
-
-            if [ "$attempt" -lt "$max_attempts" ]; then
-              echo "Delete ${image_repo}:${tag} failed with HTTP ${status_code}, retrying (${attempt}/${max_attempts})"
-              sleep $((attempt * 5))
-            fi
-            attempt=$((attempt + 1))
-          done
-
-          echo "Delete ${image_repo}:${tag} failed after ${max_attempts} attempts"
-          cat /tmp/dockerhub-delete-response.txt || true
-          return 1
-        }
-
-        cleanup_failures=0
-
-        while IFS= read -r image_repo; do
-          if ! delete_tag_with_retry "$image_repo" "${VERSION_TAG}-amd64"; then
-            echo "Warning: failed to delete ${image_repo}:${VERSION_TAG}-amd64"
-            cleanup_failures=1
-          fi
-          if ! delete_tag_with_retry "$image_repo" "${VERSION_TAG}-arm64"; then
-            echo "Warning: failed to delete ${image_repo}:${VERSION_TAG}-arm64"
-            cleanup_failures=1
-          fi
-        done < <(jq -r '.[].image_repo' <<< "$BUILD_MATRIX_JSON")
-
-        if [ "$cleanup_failures" -ne 0 ]; then
-          echo "Temporary arch-tag cleanup completed with warnings"
-          exit 1
-        fi
-
   update_latest_hash:
-    needs: [prepare, publish_manifest]
-    if: ${{ inputs.mode == 'latest' && inputs.branch == 'master' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish_manifest.result == 'success' }}
+    needs: [prepare, build_test_publish_multiarch]
+    if: ${{ inputs.mode == 'latest' && inputs.branch == 'master' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.build_test_publish_multiarch.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
     - name: Validate hash update inputs

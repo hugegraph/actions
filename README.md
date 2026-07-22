@@ -41,9 +41,10 @@ The two publishing modes behave differently:
   - updates the stored `LAST_*_HASH` variable after a successful publish
 
 - `release` mode
-  - manual publish from a versioned branch such as `release-1.7.0`
+  - manual publish from an explicitly selected source branch or commit
   - always publishes when invoked
-  - derives the image tag from the release branch version
+  - uses an explicit `version_tag`, independent from the source branch (for
+    example, source `master` can publish tag `1.7.0`)
 
 ## Multi-Platform Build Performance
 
@@ -97,17 +98,18 @@ This allows an upstream Dockerfile branch to be benchmarked before merge without
 changing public images or production cache state.
 
 For pd/store/server, a manual `master` run can also set `dry_run=true`. This
-forces a fresh exact-master amd64 integration check and arm64 build even
-when the source hash is unchanged, while disabling image pushes, cache exports,
-manifest creation, and hash updates.
+forces a fresh exact-master multi-platform build and integration check even when
+the source hash is unchanged, while disabling image pushes, cache exports, and
+hash updates.
 
 ## Critical Path: PD/Store/Server
 
 `pd/store/server` is the most important publishing flow in this repository and uses a dedicated reusable workflow:
 [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml).
 
-The amd64 candidate job builds PD, Store, HStore Server, and standalone Server
-exactly once. It starts the upstream `docker/docker-compose.dev.yml` topology with
+One candidate job builds PD, Store, HStore Server, and standalone Server as
+amd64/arm64 images and loads both variants into Docker's containerd image store.
+It starts the upstream `docker/docker-compose.dev.yml` topology with
 `pull_policy: never`, and runs a functional graph check before any image is
 published. Compatible source revisions that have the same service contract but
 only contain `docker/docker-compose.yml` use that legacy file as a fallback. The
@@ -115,9 +117,10 @@ check executes the Server image's bundled
 `/hugegraph-server/scripts/example.groovy` file, verifies the six-vertex,
 six-edge sample graph, then performs separate Gremlin read, create, update, and
 delete requests. The final query must return to the original 6V/6E baseline.
-The same loaded standalone candidate then passes its smoke test. Only after all
-enabled checks succeed are those exact local image IDs pushed as temporary
-`*-amd64` tags; the publishing stage does not rebuild them.
+The same loaded standalone candidate then passes its smoke test. Docker selects
+the local amd64 variants for these checks. Only after all enabled checks succeed
+are the already loaded multi-platform final tags pushed; the publishing stage
+does not rebuild images and does not create temporary architecture tags.
 
 The precheck override constrains the three JVMs and Store buffers for a small
 CI workload. PD and Store are limited to 1 GiB each, Server to 1.5 GiB, while
@@ -126,30 +129,21 @@ profile. These settings are functional-test limits, not production guidance or
 a performance baseline.
 
 ```text
-               source branch (master / release-x.y.z)
+                  source branch or commit
                               |
                               v
                          prepare job
-           (resolve source SHA, version tag, hash gate)
+       (resolve source SHA, explicit version tag, hash gate)
                               |
                               v
-             build_test_publish_amd64 (x4 candidates)
+           build_test_publish_multiarch (one job)
          +-------------------------------------------------+
          | pd | store | server-hstore | server-standalone |
          +-------------------------------------------------+
+        build and load linux/amd64 + linux/arm64 variants
        low-memory compose + bundled graph + Gremlin CRUD
                     standalone smoke test
-            push the exact tested amd64 image IDs
-                push x.y.z-amd64 (or latest-amd64)
-                              |
-                              v
-                   publish_arm64 (matrix x4 modules)
-                push x.y.z-arm64 (or latest-arm64)
-                              |
-                              v
-                 publish_manifest (matrix x4 modules)
-         merge amd64+arm64 => x.y.z (or latest) manifest
-         then delete temporary -amd64 / -arm64 tags
+           push loaded x.y.z (or latest) indexes
                               |
                               v
              update_latest_hash (latest mode only, optional)
@@ -157,21 +151,17 @@ a performance baseline.
 
 Tag behavior:
 
-- If the `amd64` publish succeeds but the `arm64` publish fails, manifest is not created and the `*-amd64` tag remains available.
-- If both amd64 and arm64 succeed, manifest publish runs and then removes temporary `*-amd64` and `*-arm64` tags.
-- End users should primarily use `latest` or release version tags (`x.y.z`).
+- Final tags contain both `linux/amd64` and `linux/arm64` variants.
+- No temporary `*-amd64` or `*-arm64` tags are created.
+- Failed builds or functional checks stop the job before any candidate is pushed.
 
 Execution note:
 
-- `publish_arm64` runs after the amd64 candidate gate, so ARM compute is not
-  spent when the functional checks fail.
-- ARM runner selection follows the exact source SHA. When all four Dockerfiles
-  use `FROM --platform=$BUILDPLATFORM`, an x86 runner reuses the amd64 candidate
-  cache and limits QEMU to target-image runtime steps. A measured native-ARM
-  trial on current master made each module slower because it rebuilt Maven on
-  ARM. Older release Dockerfiles without that build-stage pin instead use a
-  native ARM runner and isolated ARM cache, avoiding a full Maven build under
-  emulation. Dry-runs read existing caches but never export new ones.
+- All four current Dockerfiles use `FROM --platform=$BUILDPLATFORM` for their
+  portable build stages. The x86 runner therefore performs Maven work natively
+  and limits QEMU to ARM target-image runtime steps.
+- The single job shares checkout, Docker, QEMU, Buildx, and login setup. Dry-runs
+  read existing caches but never export new ones.
 
 ## Why The Wrappers Stay Split
 
@@ -184,12 +174,12 @@ Although the `latest` and `release` wrappers look similar, they encode different
 
 - `release` is the intentional publication path.
   - It is triggered manually.
-  - It expects a release branch and publishes that branch as a versioned image.
+  - Its source `branch` and destination `version_tag` are independent.
   - It should run even if the source is unchanged, because the operator is explicitly asking for a release publication.
 
 Most wrappers use [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).
 
-The pd/store/server wrappers use [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml), which adds integration precheck plus staged amd64/arm64 publish and manifest merge.
+The pd/store/server wrappers use [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml), which adds an integration precheck and single-job multi-platform publication.
 
 ## Reusable Workflow Responsibilities
 
@@ -209,11 +199,10 @@ Reusable workflows are the real implementation layer.
 `_publish_pd_store_server_reusable.yml` handles the pd/store/server flow:
 
 - shared source SHA resolution and latest hash gate
-- build-once amd64 candidates followed by strict low-memory integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
+- build and locally load multi-platform candidates followed by strict low-memory integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
 - import of the Server image's bundled `example.groovy` graph and Gremlin CRUD validation
-- exact-tested amd64 publication followed by cached `*-arm64` builds
-- manifest merge to final tag (`latest` or release version)
-- remove temporary `*-amd64` and `*-arm64` tags after successful manifest publish
+- publication of the loaded amd64/arm64 index directly to the final tag
+- independent release source and destination version inputs
 - standalone server smoke test for `hugegraph/hugegraph`
 
 The current precheck intentionally uses a 1 PD + 1 Store + 1 Server topology so
@@ -274,7 +263,9 @@ For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.g
 ## Practical Notes
 
 - `latest` workflows typically run on a schedule and accept manual dispatch.
-- `release` workflows typically accept only manual dispatch with a branch input.
+- `release` workflows typically accept only manual dispatch. The specialized
+  pd/store/server release wrapper accepts both a source `branch` and an
+  independent `version_tag`.
 - Most image workflows inherit credentials and settings through a reusable workflow.
 - If you change shared standard behavior, update `_publish_image_reusable.yml` first.
 - If you change pd/store/server behavior, update `_publish_pd_store_server_reusable.yml` first.
