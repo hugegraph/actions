@@ -78,6 +78,8 @@ jobs:
       version_tag: ${{ steps.prepare.outputs.version_tag }}
       cache_channel: ${{ steps.prepare.outputs.cache_channel }}
       publish_images: ${{ steps.prepare.outputs.publish_images }}
+      arm_native: ${{ steps.prepare.outputs.arm_native }}
+      arm_runner: ${{ steps.prepare.outputs.arm_runner }}
       build_matrix_json: ${{ steps.prepare.outputs.build_matrix_json }}
     steps:
     - name: Resolve mode and source ref
@@ -145,11 +147,43 @@ jobs:
           publish_images="true"
         fi
 
+        arm_native="false"
+        for dockerfile in \
+          hugegraph-pd/Dockerfile \
+          hugegraph-store/Dockerfile \
+          hugegraph-server/Dockerfile-hstore \
+          hugegraph-server/Dockerfile; do
+          raw_url="https://raw.githubusercontent.com/${REPOSITORY_URL}/${source_sha}/${dockerfile}"
+          if ! dockerfile_content="$(
+            curl --fail --silent --show-error --location --retry 3 "$raw_url"
+          )"; then
+            echo "Failed to inspect ${dockerfile}; selecting native ARM"
+            arm_native="true"
+            break
+          fi
+          first_from="$(
+            awk 'toupper($1) == "FROM" { print; exit }' <<< "$dockerfile_content"
+          )"
+          if ! grep -iE "^FROM[[:space:]]+--platform=\\\$BUILDPLATFORM[[:space:]]+" \
+            <<< "$first_from" >/dev/null; then
+            echo "${dockerfile} does not pin its build stage to BUILDPLATFORM; selecting native ARM"
+            arm_native="true"
+            break
+          fi
+        done
+        if [ "$arm_native" = "true" ]; then
+          arm_runner="ubuntu-24.04-arm"
+        else
+          arm_runner="ubuntu-latest"
+        fi
+
         {
           echo "source_sha=$source_sha"
           echo "version_tag=$version_tag"
           echo "cache_channel=$cache_channel"
           echo "publish_images=$publish_images"
+          echo "arm_native=$arm_native"
+          echo "arm_runner=$arm_runner"
           echo "need_update=$need_update"
           echo "build_matrix_json<<EOF"
           cat <<'JSON'
@@ -188,6 +222,8 @@ jobs:
         CACHE_CHANNEL: ${{ steps.prepare.outputs.cache_channel }}
         PUBLISH_IMAGES: ${{ steps.prepare.outputs.publish_images }}
         DRY_RUN: ${{ inputs.dry_run }}
+        ARM_NATIVE: ${{ steps.prepare.outputs.arm_native }}
+        ARM_RUNNER: ${{ steps.prepare.outputs.arm_runner }}
       run: |
         {
           echo "## PD / Store / Server image build"
@@ -197,13 +233,21 @@ jobs:
           echo "- Publish images: \`$PUBLISH_IMAGES\`"
           echo "- Dry run: \`$DRY_RUN\`"
           if [ "$PUBLISH_IMAGES" = "true" ]; then
-            echo "- Cache writers: amd64 candidate and native arm64 jobs"
+            if [ "$ARM_NATIVE" = "true" ]; then
+              echo "- Cache writers: amd64 candidate and native arm64 jobs"
+            else
+              echo "- Cache writer: amd64 candidate job"
+            fi
           else
             echo "- Cache policy: read-only validation (no registry exports)"
           fi
-          echo "- ARM builder: native \`ubuntu-24.04-arm\` (no QEMU)"
-          echo "- amd64 caches: \`buildcache-$CACHE_CHANNEL\`"
-          echo "- arm64 caches: \`buildcache-arm64-$CACHE_CHANNEL\`"
+          echo "- ARM runner: \`$ARM_RUNNER\`"
+          if [ "$ARM_NATIVE" = "true" ]; then
+            echo "- ARM strategy: native build with isolated \`buildcache-arm64-$CACHE_CHANNEL\` caches"
+          else
+            echo "- ARM strategy: x86-native build stage plus QEMU target-image stage"
+            echo "- Shared per-module caches: \`buildcache-$CACHE_CHANNEL\`"
+          fi
         } >> "$GITHUB_STEP_SUMMARY"
 
   build_test_publish_amd64:
@@ -658,7 +702,7 @@ jobs:
   publish_arm64:
     needs: [prepare, build_test_publish_amd64]
     if: ${{ needs.prepare.outputs.need_update == 'true' && needs.build_test_publish_amd64.result == 'success' }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ needs.prepare.outputs.arm_runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -669,6 +713,7 @@ jobs:
       VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
       MVN_ARGS: ${{ inputs.mvn_args }}
       CACHE_CHANNEL: ${{ needs.prepare.outputs.cache_channel }}
+      ARM_NATIVE: ${{ needs.prepare.outputs.arm_native }}
     steps:
     - name: Resolve tags (${{ matrix.module }})
       id: tags
@@ -676,7 +721,11 @@ jobs:
         IMAGE_REPO: ${{ matrix.image_repo }}
       run: |
         image_arm64="${IMAGE_REPO}:${VERSION_TAG}-arm64"
-        module_cache_ref="${IMAGE_REPO}:buildcache-arm64-${CACHE_CHANNEL}"
+        if [ "$ARM_NATIVE" = "true" ]; then
+          module_cache_ref="${IMAGE_REPO}:buildcache-arm64-${CACHE_CHANNEL}"
+        else
+          module_cache_ref="${IMAGE_REPO}:buildcache-${CACHE_CHANNEL}"
+        fi
 
         {
           echo "image_arm64=$image_arm64"
@@ -689,6 +738,10 @@ jobs:
         repository: ${{ env.REPOSITORY_URL }}
         ref: ${{ env.SOURCE_SHA }}
         fetch-depth: 2
+
+    - name: Set up QEMU (${{ matrix.module }})
+      if: ${{ needs.prepare.outputs.arm_native != 'true' }}
+      uses: docker/setup-qemu-action@v4
 
     - name: Set up Docker Buildx (${{ matrix.module }})
       uses: docker/setup-buildx-action@v4
@@ -710,7 +763,7 @@ jobs:
         push: ${{ needs.prepare.outputs.publish_images == 'true' }}
         tags: ${{ steps.tags.outputs.image_arm64 }}
         cache-from: type=registry,ref=${{ steps.tags.outputs.module_cache_ref }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref={0},mode=max', steps.tags.outputs.module_cache_ref) || '' }}
+        cache-to: ${{ needs.prepare.outputs.arm_native == 'true' && needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref={0},mode=max', steps.tags.outputs.module_cache_ref) || '' }}
         build-args: ${{ env.MVN_ARGS }}
 
   publish_manifest:

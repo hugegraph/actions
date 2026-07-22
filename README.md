@@ -97,7 +97,7 @@ This allows an upstream Dockerfile branch to be benchmarked before merge without
 changing public images or production cache state.
 
 For pd/store/server, a manual `master` run can also set `dry_run=true`. This
-forces a fresh exact-master amd64 integration check and native-arm64 build even
+forces a fresh exact-master amd64 integration check and arm64 build even
 when the source hash is unchanged, while disabling image pushes, cache exports,
 manifest creation, and hash updates.
 
@@ -143,7 +143,7 @@ a performance baseline.
                 push x.y.z-amd64 (or latest-amd64)
                               |
                               v
-          publish_arm64 on native ARM (matrix x4 modules)
+                   publish_arm64 (matrix x4 modules)
                 push x.y.z-arm64 (or latest-arm64)
                               |
                               v
@@ -165,11 +165,13 @@ Execution note:
 
 - `publish_arm64` runs after the amd64 candidate gate, so ARM compute is not
   spent when the functional checks fail.
-- ARM builds use GitHub's native `ubuntu-24.04-arm` runner and do not install
-  QEMU. The upstream Dockerfiles still run Maven separately on that runner.
-  Reusing one cross-architecture Java distribution is a future Dockerfile
-  optimization and requires auditing JNI, native libraries, and downloaded
-  platform-specific artifacts first.
+- ARM runner selection follows the exact source SHA. When all four Dockerfiles
+  use `FROM --platform=$BUILDPLATFORM`, an x86 runner reuses the amd64 candidate
+  cache and limits QEMU to target-image runtime steps. A measured native-ARM
+  trial on current master made each module slower because it rebuilt Maven on
+  ARM. Older release Dockerfiles without that build-stage pin instead use a
+  native ARM runner and isolated ARM cache, avoiding a full Maven build under
+  emulation. Dry-runs read existing caches but never export new ones.
 
 ## Why The Wrappers Stay Split
 
@@ -209,7 +211,7 @@ Reusable workflows are the real implementation layer.
 - shared source SHA resolution and latest hash gate
 - build-once amd64 candidates followed by strict low-memory integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
 - import of the Server image's bundled `example.groovy` graph and Gremlin CRUD validation
-- exact-tested amd64 publication followed by native-runner `*-arm64` builds
+- exact-tested amd64 publication followed by cached `*-arm64` builds
 - manifest merge to final tag (`latest` or release version)
 - remove temporary `*-amd64` and `*-arm64` tags after successful manifest publish
 - standalone server smoke test for `hugegraph/hugegraph`
