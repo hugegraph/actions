@@ -16,6 +16,11 @@ on:
         description: "source branch name"
         required: true
         type: string
+      version_tag:
+        description: "release image tag, independent from the source branch"
+        required: false
+        default: ''
+        type: string
       mvn_args:
         description: "mvn build args"
         required: false
@@ -25,6 +30,11 @@ on:
         description: "whether integration precheck is mandatory before publish"
         required: false
         default: true
+        type: boolean
+      dry_run:
+        description: "build and validate every architecture without publishing"
+        required: false
+        default: false
         type: boolean
       wait_timeout_sec:
         description: "docker compose wait timeout in seconds"
@@ -73,7 +83,6 @@ jobs:
       version_tag: ${{ steps.prepare.outputs.version_tag }}
       cache_channel: ${{ steps.prepare.outputs.cache_channel }}
       publish_images: ${{ steps.prepare.outputs.publish_images }}
-      build_matrix_json: ${{ steps.prepare.outputs.build_matrix_json }}
     steps:
     - name: Resolve mode and source ref
       id: prepare
@@ -81,13 +90,19 @@ jobs:
         MODE: ${{ inputs.mode }}
         REPOSITORY_URL: ${{ inputs.repository_url }}
         BRANCH: ${{ inputs.branch }}
+        REQUESTED_VERSION_TAG: ${{ inputs.version_tag }}
         ENABLE_HASH_GATE: ${{ inputs.enable_hash_gate }}
         LAST_HASH_VALUE: ${{ inputs.last_hash_value }}
+        DRY_RUN: ${{ inputs.dry_run }}
       run: |
         set -euo pipefail
 
         if [ "$MODE" != "latest" ] && [ "$MODE" != "release" ]; then
           echo "Invalid mode: $MODE. Expected latest or release."
+          exit 1
+        fi
+        if [ "$MODE" = "release" ] && [ "$DRY_RUN" = "true" ]; then
+          echo "dry_run is only supported by latest mode"
           exit 1
         fi
 
@@ -100,7 +115,11 @@ jobs:
         if [ "$MODE" = "latest" ]; then
           if [ "$BRANCH" = "master" ]; then
             version_tag="latest"
-            publish_images="true"
+            if [ "$DRY_RUN" = "true" ]; then
+              publish_images="false"
+            else
+              publish_images="true"
+            fi
           else
             safe_branch="$(
               printf '%s' "$BRANCH" \
@@ -117,13 +136,13 @@ jobs:
           fi
           cache_channel="latest"
           need_update="true"
-          if [ "$ENABLE_HASH_GATE" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
+          if [ "$DRY_RUN" != "true" ] && [ "$ENABLE_HASH_GATE" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
             need_update="false"
           fi
         else
-          version_tag="$(echo "$BRANCH" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
-          if [ -z "$version_tag" ]; then
-            echo "Branch name does not contain a valid version number (x.x.x): $BRANCH"
+          version_tag="$REQUESTED_VERSION_TAG"
+          if ! [[ "$version_tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release version_tag: $version_tag. Expected x.y.z."
             exit 1
           fi
           need_update="true"
@@ -137,42 +156,13 @@ jobs:
           echo "cache_channel=$cache_channel"
           echo "publish_images=$publish_images"
           echo "need_update=$need_update"
-          echo "build_matrix_json<<EOF"
-          cat <<'JSON'
-          [
-            {
-              "module": "pd",
-              "image_repo": "hugegraph/pd",
-              "dockerfile": "./hugegraph-pd/Dockerfile",
-              "smoke_test": false
-            },
-            {
-              "module": "store",
-              "image_repo": "hugegraph/store",
-              "dockerfile": "./hugegraph-store/Dockerfile",
-              "smoke_test": false
-            },
-            {
-              "module": "server-hstore",
-              "image_repo": "hugegraph/server",
-              "dockerfile": "./hugegraph-server/Dockerfile-hstore",
-              "smoke_test": false
-            },
-            {
-              "module": "server-standalone",
-              "image_repo": "hugegraph/hugegraph",
-              "dockerfile": "./hugegraph-server/Dockerfile",
-              "smoke_test": true
-            }
-          ]
-        JSON
-          echo "EOF"
         } >> "$GITHUB_OUTPUT"
 
     - name: Summarize build cache strategy
       env:
         CACHE_CHANNEL: ${{ steps.prepare.outputs.cache_channel }}
         PUBLISH_IMAGES: ${{ steps.prepare.outputs.publish_images }}
+        DRY_RUN: ${{ inputs.dry_run }}
       run: |
         {
           echo "## PD / Store / Server image build"
@@ -180,27 +170,33 @@ jobs:
           echo "- Cache backend: Docker Hub registry (BuildKit, mode=max)"
           echo "- Cache channel: \`$CACHE_CHANNEL\`"
           echo "- Publish images: \`$PUBLISH_IMAGES\`"
+          echo "- Dry run: \`$DRY_RUN\`"
           if [ "$PUBLISH_IMAGES" = "true" ]; then
-            echo "- Cache writers: integration precheck and amd64 publish jobs"
+          echo "- Cache writer: tested multi-platform candidate job"
           else
             echo "- Cache policy: read-only validation (no registry exports)"
           fi
-          echo "- Cache reader: arm64 publish jobs"
-          echo "- PD: \`hugegraph/pd:buildcache-$CACHE_CHANNEL\`"
-          echo "- Store: \`hugegraph/store:buildcache-$CACHE_CHANNEL\`"
-          echo "- Server (HStore): \`hugegraph/server:buildcache-$CACHE_CHANNEL\`"
-          echo "- Server (standalone): \`hugegraph/hugegraph:buildcache-$CACHE_CHANNEL\`"
+          echo "- Build strategy: one x86 job loads amd64/arm64 images into the containerd image store"
+          echo "- Test platform: locally loaded amd64 variants from the final multi-platform tags"
+          echo "- Shared per-module caches: \`buildcache-$CACHE_CHANNEL\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
-  integration_precheck:
+  build_test_publish_multiarch:
     needs: prepare
-    if: ${{ needs.prepare.outputs.need_update == 'true' && inputs.strict_mode }}
+    if: ${{ needs.prepare.outputs.need_update == 'true' }}
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: ${{ inputs.repository_url }}
       SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
       MVN_ARGS: ${{ inputs.mvn_args }}
       WAIT_TIMEOUT_SEC: ${{ inputs.wait_timeout_sec }}
+      VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
+      CACHE_CHANNEL: ${{ needs.prepare.outputs.cache_channel }}
+      PUBLISH_IMAGES: ${{ needs.prepare.outputs.publish_images }}
+      PD_IMAGE: hugegraph/pd:${{ needs.prepare.outputs.version_tag }}
+      STORE_IMAGE: hugegraph/store:${{ needs.prepare.outputs.version_tag }}
+      HSTORE_IMAGE: hugegraph/server:${{ needs.prepare.outputs.version_tag }}
+      STANDALONE_IMAGE: hugegraph/hugegraph:${{ needs.prepare.outputs.version_tag }}
     steps:
     - name: Validate wait timeout
       run: |
@@ -215,6 +211,20 @@ jobs:
         repository: ${{ env.REPOSITORY_URL }}
         ref: ${{ env.SOURCE_SHA }}
         fetch-depth: 2
+        persist-credentials: false
+
+    - name: Set up Docker with containerd image store
+      uses: docker/setup-docker-action@v5
+      with:
+        daemon-config: |
+          {
+            "features": {
+              "containerd-snapshotter": true
+            }
+          }
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v4
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
@@ -232,90 +242,428 @@ jobs:
         docker system prune -af || true
         docker builder prune -af || true
 
-    - name: Build x86 PD image for integration check
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ./hugegraph-pd/Dockerfile
-        platforms: linux/amd64
-        load: true
-        tags: hg-ci/pd:precheck
-        cache-from: type=registry,ref=hugegraph/pd:buildcache-${{ needs.prepare.outputs.cache_channel }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/pd:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
-        build-args: ${{ env.MVN_ARGS }}
+    - name: Build multi-platform candidates with retries
+      run: |
+        set -euo pipefail
 
-    - name: Build x86 Store image for integration check
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ./hugegraph-store/Dockerfile
-        platforms: linux/amd64
-        load: true
-        tags: hg-ci/store:precheck
-        cache-from: type=registry,ref=hugegraph/store:buildcache-${{ needs.prepare.outputs.cache_channel }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/store:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
-        build-args: ${{ env.MVN_ARGS }}
+        build_candidate() {
+          local module="$1" image="$2" dockerfile="$3" cache_repo="$4"
+          local attempt succeeded
+          local -a build_command
+          succeeded="false"
 
-    - name: Build x86 Server(hstore) image for integration check
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ./hugegraph-server/Dockerfile-hstore
-        platforms: linux/amd64
-        load: true
-        tags: hg-ci/server:precheck
-        cache-from: type=registry,ref=hugegraph/server:buildcache-${{ needs.prepare.outputs.cache_channel }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/server:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
-        build-args: ${{ env.MVN_ARGS }}
+          for attempt in 1 2 3; do
+            echo "Building ${module} (attempt ${attempt}/3) at $(date -u +%FT%TZ)"
+            build_command=(
+              docker buildx build
+              --file "$dockerfile"
+              --platform "linux/amd64,linux/arm64"
+              --tag "$image"
+              --cache-from "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL}"
+              --load
+            )
+            if [ "$PUBLISH_IMAGES" = "true" ]; then
+              build_command+=(
+                --cache-to "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL},mode=max"
+              )
+            fi
+            while IFS= read -r build_arg; do
+              if [ -n "$build_arg" ]; then
+                build_command+=(--build-arg "$build_arg")
+              fi
+            done <<< "$MVN_ARGS"
+            build_command+=(.)
+
+            if "${build_command[@]}"; then
+              succeeded="true"
+              echo "Built ${module} at $(date -u +%FT%TZ)"
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Build failed for ${module}; retrying with cached layers"
+              sleep $((attempt * 5))
+            fi
+          done
+
+          if [ "$succeeded" != "true" ]; then
+            echo "Failed to build ${module} after 3 attempts"
+            return 1
+          fi
+        }
+
+        build_candidate pd "$PD_IMAGE" ./hugegraph-pd/Dockerfile hugegraph/pd
+        build_candidate store "$STORE_IMAGE" ./hugegraph-store/Dockerfile hugegraph/store
+        build_candidate server-hstore "$HSTORE_IMAGE" ./hugegraph-server/Dockerfile-hstore hugegraph/server
+        build_candidate server-standalone "$STANDALONE_IMAGE" ./hugegraph-server/Dockerfile hugegraph/hugegraph
+
+    - name: Verify locally loaded platform variants
+      run: |
+        set -euo pipefail
+        for image in "$PD_IMAGE" "$STORE_IMAGE" "$HSTORE_IMAGE" "$STANDALONE_IMAGE"; do
+          docker image inspect --platform linux/amd64 "$image" >/dev/null
+          docker image inspect --platform linux/arm64 "$image" >/dev/null
+          echo "Loaded amd64 and arm64 variants: ${image}"
+        done
 
     - name: Start compose stack with local images
+      if: ${{ inputs.strict_mode }}
       run: |
-        if [ ! -f "docker/docker-compose.yml" ]; then
-          echo "ERROR: docker/docker-compose.yml not found in $REPOSITORY_URL@$SOURCE_SHA"
-          echo "Please update the compose file path in this workflow."
+        if [ -f "docker/docker-compose.dev.yml" ]; then
+          compose_file="docker/docker-compose.dev.yml"
+        elif [ -f "docker/docker-compose.yml" ]; then
+          compose_file="docker/docker-compose.yml"
+          echo "WARN: docker/docker-compose.dev.yml is unavailable; using legacy docker/docker-compose.yml"
+        else
+          echo "ERROR: no supported compose file found in $REPOSITORY_URL@$SOURCE_SHA"
+          echo "Expected docker/docker-compose.dev.yml or docker/docker-compose.yml."
           exit 1
         fi
+        echo "COMPOSE_FILE=$compose_file" >> "$GITHUB_ENV"
+
+        cat > /tmp/hg-ci-patch-server-config.sh <<'PATCH_SERVER'
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        set_property() {
+          local file="$1" key="$2" value="$3" escaped
+          escaped=${key//./\.}
+          if grep -qE "^[[:space:]]*${escaped}[[:space:]]*=" "$file"; then
+            sed -E -i "s|^[[:space:]]*${escaped}[[:space:]]*=.*|${key}=${value}|" "$file"
+          else
+            printf '%s=%s\n' "$key" "$value" >> "$file"
+          fi
+        }
+
+        set_yaml_scalar() {
+          local file="$1" key="$2" value="$3"
+          if grep -qE "^[[:space:]]*${key}:" "$file"; then
+            sed -E -i "s|^([[:space:]]*)${key}:.*|\1${key}: ${value}|" "$file"
+          else
+            printf '%s: %s\n' "$key" "$value" >> "$file"
+          fi
+        }
+
+        set_property ./conf/rest-server.properties batch.max_write_threads 4
+        set_property ./conf/rest-server.properties restserver.min_free_memory 32
+        set_yaml_scalar ./conf/gremlin-server.yaml threadPoolWorker 4
+        set_yaml_scalar ./conf/gremlin-server.yaml gremlinPool 4
+
+        echo "Applied CI Server resource configuration"
+        exec ./docker-entrypoint.sh
+        PATCH_SERVER
+        chmod 755 /tmp/hg-ci-patch-server-config.sh
 
         cat > /tmp/docker-compose.ci.override.yml <<COMPOSE_OVERRIDE
         services:
           pd:
-            image: hg-ci/pd:precheck
+            image: ${PD_IMAGE}
+            container_name: hg-pd
             pull_policy: never
+            mem_limit: 1024m
+            cpus: 2.0
+            environment:
+              JAVA_OPTS: >-
+                -Xms128m -Xmx128m
+                -XX:ActiveProcessorCount=2
+                -XX:MaxMetaspaceSize=192m
+                -XX:MaxDirectMemorySize=128m
+                -XX:+UseContainerSupport
+                -Dlog4j2.asyncLoggerConfigRingBufferSize=8192
+                -DAsyncLoggerConfig.RingBufferSize=8192
+                -Dthread.pool.grpc.core=8
+                -Dthread.pool.grpc.max=32
+                -Dthread.pool.grpc.queue=512
+                -Djob.interruptableThreadPool.core=1
+                -Djob.interruptableThreadPool.max=8
+                -Djob.interruptableThreadPool.queue=256
+                -Djob.uninterruptibleThreadPool.core=0
+                -Djob.uninterruptibleThreadPool.max=4
+                -Djob.uninterruptibleThreadPool.queue=128
+                -Dpartition.default-shard-count=1
+                -Dpartition.store-max-shard-count=12
           store:
-            image: hg-ci/store:precheck
+            image: ${STORE_IMAGE}
+            container_name: hg-store
             pull_policy: never
+            mem_limit: 1024m
+            cpus: 2.0
+            environment:
+              JAVA_OPTS: >-
+                -Xms128m -Xmx128m
+                -XX:ActiveProcessorCount=2
+                -XX:MaxMetaspaceSize=192m
+                -XX:MaxDirectMemorySize=128m
+                -XX:+UseContainerSupport
+                -Dlog4j2.asyncLoggerConfigRingBufferSize=8192
+                -DAsyncLoggerConfig.RingBufferSize=8192
+                -Drocksdb.total_memory_size=134217728
+                -Drocksdb.write_buffer_size=2097152
+                -Drocksdb.min_write_buffer_number_to_merge=2
+                -Dthread.pool.grpc.core=8
+                -Dthread.pool.grpc.max=32
+                -Dthread.pool.grpc.queue=512
+                -Dthread.pool.scan.core=4
+                -Dthread.pool.scan.max=16
+                -Dthread.pool.scan.queue=256
+                -Djob.interruptableThreadPool.core=2
+                -Djob.interruptableThreadPool.max=8
+                -Djob.interruptableThreadPool.queue=256
+                -Djob.uninterruptibleThreadPool.core=0
+                -Djob.uninterruptibleThreadPool.max=4
+                -Djob.uninterruptibleThreadPool.queue=128
+                -Dquery.push-down.threads=8
+                -Dquery.push-down.fetch_batch=1000
+                -Dquery.push-down.fetch_timeout=30000
+                -Dquery.push-down.memory_limit_count=10000
+                -Dquery.push-down.index_size_limit_count=10000
+                -Draft.disruptorBufferSize=512
+                -Draft.metrics=false
+                -Draft.maxReplicatorInflightMsgs=32
+                -Draft.maxEntriesSize=64
+                -Draft.maxBodySize=262144
           server:
-            image: hg-ci/server:precheck
+            image: ${HSTORE_IMAGE}
+            container_name: hg-server
             pull_policy: never
+            mem_limit: 1536m
+            cpus: 4.0
+            entrypoint:
+              - /usr/bin/dumb-init
+              - "--"
+              - /opt/hg-ci/patch-server-config.sh
+            environment:
+              JAVA_OPTS: >-
+                -Xms256m -Xmx384m
+                -XX:ActiveProcessorCount=4
+                -XX:MaxMetaspaceSize=256m
+                -XX:MaxDirectMemorySize=128m
+                -XX:+UseContainerSupport
+                -Dlog4j2.asyncLoggerConfigRingBufferSize=8192
+                -DAsyncLoggerConfig.RingBufferSize=8192
+            volumes:
+              - type: bind
+                source: /tmp/hg-ci-patch-server-config.sh
+                target: /opt/hg-ci/patch-server-config.sh
+                read_only: true
         COMPOSE_OVERRIDE
 
         docker compose \
           -p hg-ci-precheck \
-          -f docker/docker-compose.yml \
+          -f "$compose_file" \
           -f /tmp/docker-compose.ci.override.yml \
           up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
 
-        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml ps
+        docker compose -p hg-ci-precheck -f "$compose_file" -f /tmp/docker-compose.ci.override.yml ps
+
+    - name: Verify CI resource limits
+      if: ${{ inputs.strict_mode }}
+      run: |
+        set -euo pipefail
+
+        assert_memory_limit() {
+          local container="$1" expected_bytes="$2" actual_bytes
+          actual_bytes="$(docker inspect --format '{{.HostConfig.Memory}}' "$container")"
+          if [ "$actual_bytes" != "$expected_bytes" ]; then
+            echo "Unexpected memory limit for ${container}: expected ${expected_bytes}, got ${actual_bytes}"
+            exit 1
+          fi
+          echo "${container} memory limit: ${actual_bytes} bytes"
+        }
+
+        assert_memory_limit hg-pd 1073741824
+        assert_memory_limit hg-store 1073741824
+        assert_memory_limit hg-server 1610612736
+
+        for container in hg-pd hg-store hg-server; do
+          docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" \
+            | grep '^JAVA_OPTS='
+          docker exec "$container" bash -lc "ps -eo args | grep '[j]ava'"
+        done
+        docker exec hg-server grep -E \
+          '^(batch.max_write_threads|restserver.min_free_memory)=' \
+          /hugegraph-server/conf/rest-server.properties
+        docker exec hg-server grep -E \
+          '^[[:space:]]*(threadPoolWorker|gremlinPool):' \
+          /hugegraph-server/conf/gremlin-server.yaml
+
+        docker stats --no-stream hg-pd hg-store hg-server
 
     - name: Verify integration endpoints
+      if: ${{ inputs.strict_mode }}
       run: |
         curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8620/v1/health" >/dev/null
         curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8520/v1/health" >/dev/null
         curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8080/versions" >/dev/null
 
-    - name: Dump compose logs on failure
-      if: ${{ failure() }}
+    - name: Import bundled example graph
+      if: ${{ inputs.strict_mode }}
       run: |
-        docker compose -p hg-ci-precheck -f docker/docker-compose.yml -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
+        set -euo pipefail
+
+        docker exec hg-server test -r /hugegraph-server/scripts/example.groovy
+        docker exec hg-server bash -lc \
+          'cd /hugegraph-server && bin/gremlin-console.sh -- -e scripts/example.groovy' \
+          | tee /tmp/hg-ci-example-import.log
+
+        grep -Fq '>>>> query all vertices: size=6' /tmp/hg-ci-example-import.log
+        grep -Fq '>>>> query all edges: size=6' /tmp/hg-ci-example-import.log
+
+    - name: Verify bundled graph with Gremlin CRUD
+      if: ${{ inputs.strict_mode }}
+      env:
+        CI_VERTEX_NAME: hg-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+
+        gremlin_request() {
+          local label="$1" script="$2" payload response_file
+          response_file="/tmp/hg-ci-gremlin-${label}.json"
+          payload="$(
+            jq -nc --arg gremlin "$script" \
+              '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",aliases:{graph:"DEFAULT-hugegraph",g:"__g_DEFAULT-hugegraph"}}'
+          )"
+          curl --fail-with-body -sS \
+            --compressed \
+            --connect-timeout 3 \
+            --max-time 30 \
+            -H 'Content-Type: application/json' \
+            --data-binary "$payload" \
+            http://127.0.0.1:8080/gremlin \
+            | tee "$response_file"
+          jq -e '.status.code == 200' "$response_file" >/dev/null
+        }
+
+        baseline_script="[[vertices:g.V().count().next(),edges:g.E().count().next(),names:g.V().values('name').order().toList(),markoCreated:g.V().has('person','name','marko').out('created').values('name').order().toList()]]"
+        gremlin_request baseline "$baseline_script"
+        jq -e '
+          .result.data[0].vertices == 6 and
+          .result.data[0].edges == 6 and
+          .result.data[0].names == ["josh","lop","marko","peter","ripple","vadas"] and
+          .result.data[0].markoCreated == ["lop"]
+        ' /tmp/hg-ci-gremlin-baseline.json >/dev/null
+
+        create_script="ci=graph.addVertex(T.label,'person','name','${CI_VERTEX_NAME}','age',40,'city','CI');marko=g.V().has('person','name','marko').next();marko.addEdge('knows',ci,'date','ci','weight',0.1d);graph.tx().commit();'${CI_VERTEX_NAME}'"
+        gremlin_request create "$create_script"
+        jq -e --arg name "$CI_VERTEX_NAME" '.result.data == [$name]' \
+          /tmp/hg-ci-gremlin-create.json >/dev/null
+
+        read_created_script="[[vertices:g.V().count().next(),edges:g.E().count().next(),matches:g.V().has('person','name','marko').out('knows').has('name','${CI_VERTEX_NAME}').count().next()]]"
+        gremlin_request read-created "$read_created_script"
+        jq -e '
+          .result.data[0].vertices == 7 and
+          .result.data[0].edges == 7 and
+          .result.data[0].matches == 1
+        ' /tmp/hg-ci-gremlin-read-created.json >/dev/null
+
+        update_script="g.V().has('person','name','${CI_VERTEX_NAME}').property('age',41).iterate();graph.tx().commit();g.V().has('person','name','${CI_VERTEX_NAME}').values('age').next()"
+        gremlin_request update "$update_script"
+        jq -e '.result.data == [41]' /tmp/hg-ci-gremlin-update.json >/dev/null
+
+        delete_script="ci=g.V().has('person','name','${CI_VERTEX_NAME}').next();g.V(ci).bothE().drop().iterate();g.V(ci).drop().iterate();graph.tx().commit();[[vertices:g.V().count().next(),edges:g.E().count().next()]]"
+        gremlin_request delete "$delete_script"
+        jq -e '
+          .result.data[0].vertices == 6 and
+          .result.data[0].edges == 6
+        ' /tmp/hg-ci-gremlin-delete.json >/dev/null
+
+        gremlin_request final "$baseline_script"
+        jq -e '
+          .result.data[0].vertices == 6 and
+          .result.data[0].edges == 6 and
+          .result.data[0].names == ["josh","lop","marko","peter","ripple","vadas"]
+        ' /tmp/hg-ci-gremlin-final.json >/dev/null
+
+        docker stats --no-stream hg-pd hg-store hg-server
+
+    - name: Dump compose logs on failure
+      if: ${{ failure() && inputs.strict_mode }}
+      run: |
+        if [ -n "${COMPOSE_FILE:-}" ] && [ -f /tmp/docker-compose.ci.override.yml ]; then
+          docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml ps || true
+          docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
+        else
+          echo "Compose stack was not started; COMPOSE_FILE or CI override is unavailable"
+        fi
+        docker stats --no-stream hg-pd hg-store hg-server || true
+        for container in hg-pd hg-store hg-server; do
+          docker inspect --format '{{json .State.Health}}' "$container" || true
+        done
+        for artifact in /tmp/hg-ci-example-import.log /tmp/hg-ci-gremlin-*.json; do
+          if [ -f "$artifact" ]; then
+            echo "===== ${artifact} ====="
+            cat "$artifact"
+          fi
+        done
 
     - name: Stop compose stack
       if: ${{ always() }}
       run: |
-        docker compose \
-          -p hg-ci-precheck \
-          -f docker/docker-compose.yml \
-          -f /tmp/docker-compose.ci.override.yml \
-          down -v --remove-orphans || true
+        set -euo pipefail
+
+        if [ -n "${COMPOSE_FILE:-}" ] && [ -f /tmp/docker-compose.ci.override.yml ]; then
+          docker compose \
+            -p hg-ci-precheck \
+            -f "$COMPOSE_FILE" \
+            -f /tmp/docker-compose.ci.override.yml \
+            down -v --remove-orphans
+        else
+          echo "Compose stack was not started; skipping compose down"
+        fi
+
+        leftover_containers="$(docker ps -aq --filter label=com.docker.compose.project=hg-ci-precheck)"
+        leftover_networks="$(docker network ls -q --filter label=com.docker.compose.project=hg-ci-precheck)"
+        leftover_volumes="$(docker volume ls -q --filter label=com.docker.compose.project=hg-ci-precheck)"
+        if [ -n "$leftover_containers$leftover_networks$leftover_volumes" ]; then
+          echo "Compose cleanup left resources behind"
+          docker ps -a --filter label=com.docker.compose.project=hg-ci-precheck
+          docker network ls --filter label=com.docker.compose.project=hg-ci-precheck
+          docker volume ls --filter label=com.docker.compose.project=hg-ci-precheck
+          exit 1
+        fi
+        echo "Compose cleanup removed all project containers, networks, and volumes"
+
+    - name: Smoke test standalone Server candidate
+      if: ${{ success() }}
+      run: |
+        set -euo pipefail
+        docker run --pull=never -d --name=hg-ci-standalone -p 18080:8080 "$STANDALONE_IMAGE"
+        for attempt in $(seq 1 30); do
+          if curl -fsS --connect-timeout 3 --max-time 8 http://127.0.0.1:18080/versions >/dev/null; then
+            echo "Standalone candidate is ready after attempt ${attempt}"
+            exit 0
+          fi
+          if ! docker inspect --format '{{.State.Running}}' hg-ci-standalone | grep -qx true; then
+            docker logs hg-ci-standalone
+            exit 1
+          fi
+          sleep 2
+        done
+        docker logs hg-ci-standalone
+        exit 1
+
+    - name: Push tested multi-platform candidates
+      if: ${{ success() && needs.prepare.outputs.publish_images == 'true' }}
+      run: |
+        set -euo pipefail
+        for image in "$PD_IMAGE" "$STORE_IMAGE" "$HSTORE_IMAGE" "$STANDALONE_IMAGE"; do
+          pushed="false"
+          for attempt in 1 2 3; do
+            echo "Pushing tested multi-platform candidate ${image} (attempt ${attempt}/3)"
+            if docker push "$image"; then
+              pushed="true"
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          if [ "$pushed" != "true" ]; then
+            echo "Failed to push ${image} after 3 attempts"
+            exit 1
+          fi
+        done
+
+    - name: Cleanup standalone container
+      if: ${{ always() }}
+      run: docker rm -f hg-ci-standalone >/dev/null 2>&1 || true
 
     - name: Post-check cleanup
       if: ${{ always() }}
@@ -323,292 +671,9 @@ jobs:
         docker system prune -af || true
         docker builder prune -af || true
 
-  publish_amd64:
-    needs: [prepare, integration_precheck]
-    if: ${{ needs.prepare.outputs.need_update == 'true' && (needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped') }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.prepare.outputs.build_matrix_json) }}
-    env:
-      REPOSITORY_URL: ${{ inputs.repository_url }}
-      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-      VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
-      MVN_ARGS: ${{ inputs.mvn_args }}
-      CACHE_CHANNEL: ${{ needs.prepare.outputs.cache_channel }}
-    steps:
-    - name: Resolve tags (${{ matrix.module }})
-      id: tags
-      env:
-        IMAGE_REPO: ${{ matrix.image_repo }}
-      run: |
-        image_amd64="${IMAGE_REPO}:${VERSION_TAG}-amd64"
-        module_cache_ref="${IMAGE_REPO}:buildcache-${CACHE_CHANNEL}"
-
-        {
-          echo "image_amd64=$image_amd64"
-          echo "module_cache_ref=$module_cache_ref"
-        } >> "$GITHUB_OUTPUT"
-
-    - name: Checkout source (${{ matrix.module }})
-      uses: actions/checkout@v7
-      with:
-        repository: ${{ env.REPOSITORY_URL }}
-        ref: ${{ env.SOURCE_SHA }}
-        fetch-depth: 2
-
-    - name: Set up Docker Buildx (${{ matrix.module }})
-      uses: docker/setup-buildx-action@v4
-      with:
-        version: latest
-
-    - name: Login to Docker Hub (${{ matrix.module }})
-      uses: docker/login-action@v4
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Build and load amd64 image for smoke test (${{ matrix.module }})
-      if: ${{ matrix.smoke_test }}
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ${{ matrix.dockerfile }}
-        platforms: linux/amd64
-        load: true
-        tags: ${{ steps.tags.outputs.image_amd64 }}
-        cache-from: type=registry,ref=${{ steps.tags.outputs.module_cache_ref }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref={0},mode=max', steps.tags.outputs.module_cache_ref) || '' }}
-        build-args: ${{ env.MVN_ARGS }}
-
-    - name: Build and push amd64 image (${{ matrix.module }})
-      if: ${{ !matrix.smoke_test }}
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ${{ matrix.dockerfile }}
-        platforms: linux/amd64
-        push: ${{ needs.prepare.outputs.publish_images == 'true' }}
-        tags: ${{ steps.tags.outputs.image_amd64 }}
-        cache-from: type=registry,ref=${{ steps.tags.outputs.module_cache_ref }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref={0},mode=max', steps.tags.outputs.module_cache_ref) || '' }}
-        build-args: ${{ env.MVN_ARGS }}
-
-    - name: Smoke test standalone server amd64
-      if: ${{ matrix.smoke_test }}
-      env:
-        IMAGE_URL: ${{ steps.tags.outputs.image_amd64 }}
-      run: |
-        docker rm -f graph >/dev/null 2>&1 || true
-        docker run -d --name=graph -p 18080:8080 "$IMAGE_URL"
-        sleep 20
-        curl -fsS http://127.0.0.1:18080 >/dev/null || exit 1
-        docker ps -a
-        sleep 20
-        curl -fsS http://127.0.0.1:18080 >/dev/null || exit 1
-
-    - name: Push tested amd64 image (${{ matrix.module }})
-      if: ${{ matrix.smoke_test && needs.prepare.outputs.publish_images == 'true' }}
-      env:
-        IMAGE_URL: ${{ steps.tags.outputs.image_amd64 }}
-      run: |
-        docker push "$IMAGE_URL"
-
-    - name: Cleanup smoke test container
-      if: ${{ always() && matrix.smoke_test }}
-      run: |
-        docker rm -f graph >/dev/null 2>&1 || true
-
-  publish_arm64:
-    needs: [prepare, integration_precheck, publish_amd64]
-    if: ${{ needs.prepare.outputs.need_update == 'true' && needs.publish_amd64.result == 'success' && (needs.integration_precheck.result == 'success' || needs.integration_precheck.result == 'skipped') }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.prepare.outputs.build_matrix_json) }}
-    env:
-      REPOSITORY_URL: ${{ inputs.repository_url }}
-      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-      VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
-      MVN_ARGS: ${{ inputs.mvn_args }}
-      CACHE_CHANNEL: ${{ needs.prepare.outputs.cache_channel }}
-    steps:
-    - name: Resolve tags (${{ matrix.module }})
-      id: tags
-      env:
-        IMAGE_REPO: ${{ matrix.image_repo }}
-      run: |
-        image_arm64="${IMAGE_REPO}:${VERSION_TAG}-arm64"
-        module_cache_ref="${IMAGE_REPO}:buildcache-${CACHE_CHANNEL}"
-
-        {
-          echo "image_arm64=$image_arm64"
-          echo "module_cache_ref=$module_cache_ref"
-        } >> "$GITHUB_OUTPUT"
-
-    - name: Checkout source (${{ matrix.module }})
-      uses: actions/checkout@v7
-      with:
-        repository: ${{ env.REPOSITORY_URL }}
-        ref: ${{ env.SOURCE_SHA }}
-        fetch-depth: 2
-
-    - name: Set up QEMU (${{ matrix.module }})
-      uses: docker/setup-qemu-action@v4
-
-    - name: Set up Docker Buildx (${{ matrix.module }})
-      uses: docker/setup-buildx-action@v4
-      with:
-        version: latest
-
-    - name: Login to Docker Hub (${{ matrix.module }})
-      uses: docker/login-action@v4
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Build and push arm64 image (${{ matrix.module }})
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ${{ matrix.dockerfile }}
-        platforms: linux/arm64
-        push: ${{ needs.prepare.outputs.publish_images == 'true' }}
-        tags: ${{ steps.tags.outputs.image_arm64 }}
-        cache-from: type=registry,ref=${{ steps.tags.outputs.module_cache_ref }}
-        build-args: ${{ env.MVN_ARGS }}
-
-  publish_manifest:
-    needs: [prepare, publish_amd64, publish_arm64]
-    if: ${{ needs.prepare.outputs.need_update == 'true' && needs.prepare.outputs.publish_images == 'true' && needs.publish_amd64.result == 'success' && needs.publish_arm64.result == 'success' }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.prepare.outputs.build_matrix_json) }}
-    env:
-      VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
-    steps:
-    - name: Resolve tags (${{ matrix.module }})
-      id: tags
-      env:
-        IMAGE_REPO: ${{ matrix.image_repo }}
-      run: |
-        image_final="${IMAGE_REPO}:${VERSION_TAG}"
-        image_amd64="${IMAGE_REPO}:${VERSION_TAG}-amd64"
-        image_arm64="${IMAGE_REPO}:${VERSION_TAG}-arm64"
-
-        {
-          echo "image_final=$image_final"
-          echo "image_amd64=$image_amd64"
-          echo "image_arm64=$image_arm64"
-        } >> "$GITHUB_OUTPUT"
-
-    - name: Set up Docker Buildx (${{ matrix.module }})
-      uses: docker/setup-buildx-action@v4
-      with:
-        version: latest
-
-    - name: Login to Docker Hub (${{ matrix.module }})
-      uses: docker/login-action@v4
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-    - name: Create multi-arch manifest (${{ matrix.module }})
-      run: |
-        docker buildx imagetools create \
-          --tag "${{ steps.tags.outputs.image_final }}" \
-          "${{ steps.tags.outputs.image_amd64 }}" \
-          "${{ steps.tags.outputs.image_arm64 }}"
-
-    - name: Inspect multi-arch manifest (${{ matrix.module }})
-      run: |
-        docker buildx imagetools inspect "${{ steps.tags.outputs.image_final }}"
-
-    - name: Delete temporary arch tags after manifest publish (${{ matrix.module }})
-      continue-on-error: true
-      env:
-        IMAGE_REPO: ${{ matrix.image_repo }}
-        VERSION_TAG: ${{ env.VERSION_TAG }}
-        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
-      run: |
-        set -euo pipefail
-
-        namespace="${IMAGE_REPO%%/*}"
-        repository="${IMAGE_REPO#*/}"
-        if [ "$namespace" = "$repository" ]; then
-          echo "Invalid image repo format: $IMAGE_REPO"
-          exit 1
-        fi
-
-        login_payload="$(jq -nc --arg u "$DOCKERHUB_USERNAME" --arg p "$DOCKERHUB_PASSWORD" '{username:$u,password:$p}')"
-        auth_token="$(
-          printf '%s' "$login_payload" \
-          | curl --fail-with-body -sS -X POST "https://hub.docker.com/v2/users/login/" \
-              -H "Content-Type: application/json" \
-              --data-binary @- \
-          | jq -r '.token'
-        )"
-        if [ -z "$auth_token" ] || [ "$auth_token" = "null" ]; then
-          echo "Failed to get Docker Hub auth token"
-          exit 1
-        fi
-
-        delete_tag_with_retry() {
-          local tag="$1"
-          local attempt=1
-          local max_attempts=5
-          while [ "$attempt" -le "$max_attempts" ]; do
-            if ! status_code="$(
-              curl -sS -o /tmp/dockerhub-delete-response.txt -w "%{http_code}" -X DELETE \
-                -H "Authorization: JWT $auth_token" \
-                "https://hub.docker.com/v2/repositories/${namespace}/${repository}/tags/${tag}/"
-            )"; then
-              status_code="000"
-              echo "Delete ${IMAGE_REPO}:${tag} failed to reach Docker Hub (curl error)"
-            fi
-
-            if [ "$status_code" = "204" ] || [ "$status_code" = "404" ]; then
-              echo "Tag ${IMAGE_REPO}:${tag} delete status: $status_code"
-              return 0
-            fi
-
-            if [ "$attempt" -lt "$max_attempts" ]; then
-              echo "Delete ${IMAGE_REPO}:${tag} failed with HTTP ${status_code}, retrying (${attempt}/${max_attempts})"
-              sleep $((attempt * 5))
-            fi
-            attempt=$((attempt + 1))
-          done
-
-          echo "Delete ${IMAGE_REPO}:${tag} failed after ${max_attempts} attempts"
-          cat /tmp/dockerhub-delete-response.txt || true
-          return 1
-        }
-
-        cleanup_failures=0
-
-        if ! delete_tag_with_retry "${VERSION_TAG}-amd64"; then
-          echo "Warning: failed to delete ${IMAGE_REPO}:${VERSION_TAG}-amd64"
-          cleanup_failures=1
-        fi
-
-        if ! delete_tag_with_retry "${VERSION_TAG}-arm64"; then
-          echo "Warning: failed to delete ${IMAGE_REPO}:${VERSION_TAG}-arm64"
-          cleanup_failures=1
-        fi
-
-        if [ "$cleanup_failures" -ne 0 ]; then
-          echo "Temporary arch-tag cleanup completed with warnings"
-          exit 1
-        fi
-
   update_latest_hash:
-    needs: [prepare, publish_manifest]
-    if: ${{ inputs.mode == 'latest' && inputs.branch == 'master' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish_manifest.result == 'success' }}
+    needs: [prepare, build_test_publish_multiarch]
+    if: ${{ inputs.mode == 'latest' && inputs.branch == 'master' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.prepare.outputs.publish_images == 'true' && needs.build_test_publish_multiarch.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
     - name: Validate hash update inputs
