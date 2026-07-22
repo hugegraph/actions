@@ -191,6 +191,8 @@ jobs:
       MVN_ARGS: ${{ inputs.mvn_args }}
       WAIT_TIMEOUT_SEC: ${{ inputs.wait_timeout_sec }}
       VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
+      CACHE_CHANNEL: ${{ needs.prepare.outputs.cache_channel }}
+      PUBLISH_IMAGES: ${{ needs.prepare.outputs.publish_images }}
       PD_IMAGE: hugegraph/pd:${{ needs.prepare.outputs.version_tag }}
       STORE_IMAGE: hugegraph/store:${{ needs.prepare.outputs.version_tag }}
       HSTORE_IMAGE: hugegraph/server:${{ needs.prepare.outputs.version_tag }}
@@ -240,53 +242,59 @@ jobs:
         docker system prune -af || true
         docker builder prune -af || true
 
-    - name: Build multi-platform PD candidate
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ./hugegraph-pd/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        load: true
-        tags: ${{ env.PD_IMAGE }}
-        cache-from: type=registry,ref=hugegraph/pd:buildcache-${{ needs.prepare.outputs.cache_channel }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/pd:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
-        build-args: ${{ env.MVN_ARGS }}
+    - name: Build multi-platform candidates with retries
+      run: |
+        set -euo pipefail
 
-    - name: Build multi-platform Store candidate
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ./hugegraph-store/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        load: true
-        tags: ${{ env.STORE_IMAGE }}
-        cache-from: type=registry,ref=hugegraph/store:buildcache-${{ needs.prepare.outputs.cache_channel }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/store:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
-        build-args: ${{ env.MVN_ARGS }}
+        build_candidate() {
+          local module="$1" image="$2" dockerfile="$3" cache_repo="$4"
+          local attempt succeeded
+          local -a build_command
+          succeeded="false"
 
-    - name: Build multi-platform Server(hstore) candidate
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ./hugegraph-server/Dockerfile-hstore
-        platforms: linux/amd64,linux/arm64
-        load: true
-        tags: ${{ env.HSTORE_IMAGE }}
-        cache-from: type=registry,ref=hugegraph/server:buildcache-${{ needs.prepare.outputs.cache_channel }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/server:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
-        build-args: ${{ env.MVN_ARGS }}
+          for attempt in 1 2 3; do
+            echo "Building ${module} (attempt ${attempt}/3) at $(date -u +%FT%TZ)"
+            build_command=(
+              docker buildx build
+              --file "$dockerfile"
+              --platform "linux/amd64,linux/arm64"
+              --tag "$image"
+              --cache-from "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL}"
+              --load
+            )
+            if [ "$PUBLISH_IMAGES" = "true" ]; then
+              build_command+=(
+                --cache-to "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL},mode=max"
+              )
+            fi
+            while IFS= read -r build_arg; do
+              if [ -n "$build_arg" ]; then
+                build_command+=(--build-arg "$build_arg")
+              fi
+            done <<< "$MVN_ARGS"
+            build_command+=(.)
 
-    - name: Build multi-platform standalone Server candidate
-      uses: docker/build-push-action@v7
-      with:
-        context: .
-        file: ./hugegraph-server/Dockerfile
-        platforms: linux/amd64,linux/arm64
-        load: true
-        tags: ${{ env.STANDALONE_IMAGE }}
-        cache-from: type=registry,ref=hugegraph/hugegraph:buildcache-${{ needs.prepare.outputs.cache_channel }}
-        cache-to: ${{ needs.prepare.outputs.publish_images == 'true' && format('type=registry,ref=hugegraph/hugegraph:buildcache-{0},mode=max', needs.prepare.outputs.cache_channel) || '' }}
-        build-args: ${{ env.MVN_ARGS }}
+            if "${build_command[@]}"; then
+              succeeded="true"
+              echo "Built ${module} at $(date -u +%FT%TZ)"
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Build failed for ${module}; retrying with cached layers"
+              sleep $((attempt * 5))
+            fi
+          done
+
+          if [ "$succeeded" != "true" ]; then
+            echo "Failed to build ${module} after 3 attempts"
+            return 1
+          fi
+        }
+
+        build_candidate pd "$PD_IMAGE" ./hugegraph-pd/Dockerfile hugegraph/pd
+        build_candidate store "$STORE_IMAGE" ./hugegraph-store/Dockerfile hugegraph/store
+        build_candidate server-hstore "$HSTORE_IMAGE" ./hugegraph-server/Dockerfile-hstore hugegraph/server
+        build_candidate server-standalone "$STANDALONE_IMAGE" ./hugegraph-server/Dockerfile hugegraph/hugegraph
 
     - name: Verify locally loaded platform variants
       run: |
