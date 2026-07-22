@@ -5,8 +5,12 @@ on:
     inputs:
       branch:
         required: true
+        default: 'master'
+        description: 'source branch used to build the release images'
+      version_tag:
+        required: true
         default: ''
-        description: 'The branch name should be like *-x.x.x, for example release-1.0.0'
+        description: 'image version tag, for example 1.7.0'
       mvn_args:
         required: false
         default: ''
@@ -32,6 +36,7 @@ jobs:
       mode: release
       repository_url: apache/hugegraph
       branch: ${{ inputs.branch }}
+      version_tag: ${{ inputs.version_tag }}
       mvn_args: ${{ inputs.mvn_args }}
       strict_mode: ${{ inputs.strict_mode }}
       wait_timeout_sec: ${{ inputs.wait_timeout_sec || '300' }}
