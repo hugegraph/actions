@@ -41,7 +41,7 @@ The two publishing modes behave differently:
   - updates the stored `LAST_*_HASH` variable after a successful publish
 
 - `release` mode
-  - manual publish from an explicitly selected source branch or commit
+  - manual publish from an explicitly selected source branch
   - always publishes when invoked
   - uses an explicit `version_tag`, independent from the source branch (for
     example, source `master` can publish tag `1.7.0`)
@@ -129,7 +129,7 @@ profile. These settings are functional-test limits, not production guidance or
 a performance baseline.
 
 ```text
-                  source branch or commit
+                       source branch
                               |
                               v
                          prepare job
@@ -210,7 +210,8 @@ it fits standard GitHub-hosted runners. A full 3 PD + 3 Store + 3 Server compose
 gate remains a TODO for a larger runner or a reliable lower-resource simulation.
 
 Wrapper workflows provide the source repository, branch, and mode-specific inputs.
-Standard wrappers may also pass `build_matrix_json`, while the pd/store/server matrix is defined inside `_publish_pd_store_server_reusable.yml`.
+Standard wrappers may also pass `build_matrix_json`; the specialized
+pd/store/server workflow defines its four image builds directly.
 
 ## How To Extend
 

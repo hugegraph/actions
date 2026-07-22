@@ -83,7 +83,6 @@ jobs:
       version_tag: ${{ steps.prepare.outputs.version_tag }}
       cache_channel: ${{ steps.prepare.outputs.cache_channel }}
       publish_images: ${{ steps.prepare.outputs.publish_images }}
-      build_matrix_json: ${{ steps.prepare.outputs.build_matrix_json }}
     steps:
     - name: Resolve mode and source ref
       id: prepare
@@ -157,36 +156,6 @@ jobs:
           echo "cache_channel=$cache_channel"
           echo "publish_images=$publish_images"
           echo "need_update=$need_update"
-          echo "build_matrix_json<<EOF"
-          cat <<'JSON'
-          [
-            {
-              "module": "pd",
-              "image_repo": "hugegraph/pd",
-              "dockerfile": "./hugegraph-pd/Dockerfile",
-              "smoke_test": false
-            },
-            {
-              "module": "store",
-              "image_repo": "hugegraph/store",
-              "dockerfile": "./hugegraph-store/Dockerfile",
-              "smoke_test": false
-            },
-            {
-              "module": "server-hstore",
-              "image_repo": "hugegraph/server",
-              "dockerfile": "./hugegraph-server/Dockerfile-hstore",
-              "smoke_test": false
-            },
-            {
-              "module": "server-standalone",
-              "image_repo": "hugegraph/hugegraph",
-              "dockerfile": "./hugegraph-server/Dockerfile",
-              "smoke_test": true
-            }
-          ]
-        JSON
-          echo "EOF"
         } >> "$GITHUB_OUTPUT"
 
     - name: Summarize build cache strategy
@@ -649,7 +618,7 @@ jobs:
       if: ${{ success() }}
       run: |
         set -euo pipefail
-        docker run -d --name=hg-ci-standalone -p 18080:8080 "$STANDALONE_IMAGE"
+        docker run --pull=never -d --name=hg-ci-standalone -p 18080:8080 "$STANDALONE_IMAGE"
         for attempt in $(seq 1 30); do
           if curl -fsS --connect-timeout 3 --max-time 8 http://127.0.0.1:18080/versions >/dev/null; then
             echo "Standalone candidate is ready after attempt ${attempt}"
@@ -669,8 +638,19 @@ jobs:
       run: |
         set -euo pipefail
         for image in "$PD_IMAGE" "$STORE_IMAGE" "$HSTORE_IMAGE" "$STANDALONE_IMAGE"; do
-          echo "Pushing tested multi-platform candidate ${image}"
-          docker push "$image"
+          pushed="false"
+          for attempt in 1 2 3; do
+            echo "Pushing tested multi-platform candidate ${image} (attempt ${attempt}/3)"
+            if docker push "$image"; then
+              pushed="true"
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          if [ "$pushed" != "true" ]; then
+            echo "Failed to push ${image} after 3 attempts"
+            exit 1
+          fi
         done
 
     - name: Cleanup standalone container
@@ -685,7 +665,7 @@ jobs:
 
   update_latest_hash:
     needs: [prepare, build_test_publish_multiarch]
-    if: ${{ inputs.mode == 'latest' && inputs.branch == 'master' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.build_test_publish_multiarch.result == 'success' }}
+    if: ${{ inputs.mode == 'latest' && inputs.branch == 'master' && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.prepare.outputs.publish_images == 'true' && needs.build_test_publish_multiarch.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
     - name: Validate hash update inputs
