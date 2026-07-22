@@ -18,6 +18,11 @@ on:
         required: false
         default: true
         description: 'whether integration precheck is mandatory before publish'
+      dry_run:
+        type: boolean
+        required: false
+        default: false
+        description: 'build and validate master without publishing images or updating the hash'
       wait_timeout_sec:
         required: false
         default: '300'
@@ -36,8 +41,9 @@ jobs:
       branch: ${{ github.event.inputs.latest_source_branch || 'master' }}
       mvn_args: ${{ github.event.inputs.mvn_args || '' }}
       strict_mode: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.latest_source_branch || 'master') != 'master' || github.event.inputs.strict_mode == true || github.event.inputs.strict_mode == 'true' }}
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.dry_run == true || github.event.inputs.dry_run == 'true') }}
       wait_timeout_sec: ${{ github.event.inputs.wait_timeout_sec || '300' }}
-      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.latest_source_branch || 'master') == 'master' }}
+      enable_hash_gate: ${{ (github.event_name != 'workflow_dispatch' || (github.event.inputs.latest_source_branch || 'master') == 'master') && !(github.event.inputs.dry_run == true || github.event.inputs.dry_run == 'true') }}
       last_hash_value: ${{ vars.LAST_SERVER_HASH }}
       last_hash_name: LAST_SERVER_HASH
       hash_repo_owner: hugegraph

@@ -96,13 +96,18 @@ Latest wrappers that expose `latest_source_branch` use two execution policies:
 This allows an upstream Dockerfile branch to be benchmarked before merge without
 changing public images or production cache state.
 
+For pd/store/server, a manual `master` run can also set `dry_run=true`. This
+forces a fresh exact-master amd64 integration check and native-arm64 build even
+when the source hash is unchanged, while disabling image pushes, cache exports,
+manifest creation, and hash updates.
+
 ## Critical Path: PD/Store/Server
 
 `pd/store/server` is the most important publishing flow in this repository and uses a dedicated reusable workflow:
 [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml).
 
-The strict integration precheck builds local amd64 PD, Store, and HStore Server
-images, starts the upstream `docker/docker-compose.dev.yml` topology with
+The amd64 candidate job builds PD, Store, HStore Server, and standalone Server
+exactly once. It starts the upstream `docker/docker-compose.dev.yml` topology with
 `pull_policy: never`, and runs a functional graph check before any image is
 published. Compatible source revisions that have the same service contract but
 only contain `docker/docker-compose.yml` use that legacy file as a fallback. The
@@ -110,6 +115,9 @@ check executes the Server image's bundled
 `/hugegraph-server/scripts/example.groovy` file, verifies the six-vertex,
 six-edge sample graph, then performs separate Gremlin read, create, update, and
 delete requests. The final query must return to the original 6V/6E baseline.
+The same loaded standalone candidate then passes its smoke test. Only after all
+enabled checks succeed are those exact local image IDs pushed as temporary
+`*-amd64` tags; the publishing stage does not rebuild them.
 
 The precheck override constrains the three JVMs and Store buffers for a small
 CI workload. PD and Store are limited to 1 GiB each, Server to 1.5 GiB, while
@@ -125,18 +133,17 @@ a performance baseline.
            (resolve source SHA, version tag, hash gate)
                               |
                               v
-                  integration_precheck (optional)
-       (low-memory compose + bundled example graph + Gremlin CRUD)
-                              |
-                              v
-                   publish_amd64 (matrix x4 modules)
+             build_test_publish_amd64 (x4 candidates)
          +-------------------------------------------------+
          | pd | store | server-hstore | server-standalone |
          +-------------------------------------------------+
+       low-memory compose + bundled graph + Gremlin CRUD
+                    standalone smoke test
+            push the exact tested amd64 image IDs
                 push x.y.z-amd64 (or latest-amd64)
                               |
                               v
-                   publish_arm64 (matrix x4 modules)
+          publish_arm64 on native ARM (matrix x4 modules)
                 push x.y.z-arm64 (or latest-arm64)
                               |
                               v
@@ -156,7 +163,13 @@ Tag behavior:
 
 Execution note:
 
-- `publish_arm64` runs after `publish_amd64` by design, so x86 users can get a usable image earlier and arm64 compute is not spent when amd64 fails.
+- `publish_arm64` runs after the amd64 candidate gate, so ARM compute is not
+  spent when the functional checks fail.
+- ARM builds use GitHub's native `ubuntu-24.04-arm` runner and do not install
+  QEMU. The upstream Dockerfiles still run Maven separately on that runner.
+  Reusing one cross-architecture Java distribution is a future Dockerfile
+  optimization and requires auditing JNI, native libraries, and downloaded
+  platform-specific artifacts first.
 
 ## Why The Wrappers Stay Split
 
@@ -194,9 +207,9 @@ Reusable workflows are the real implementation layer.
 `_publish_pd_store_server_reusable.yml` handles the pd/store/server flow:
 
 - shared source SHA resolution and latest hash gate
-- strict low-memory integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
+- build-once amd64 candidates followed by strict low-memory integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
 - import of the Server image's bundled `example.groovy` graph and Gremlin CRUD validation
-- staged image publication with `*-amd64` then `*-arm64`
+- exact-tested amd64 publication followed by native-runner `*-arm64` builds
 - manifest merge to final tag (`latest` or release version)
 - remove temporary `*-amd64` and `*-arm64` tags after successful manifest publish
 - standalone server smoke test for `hugegraph/hugegraph`
