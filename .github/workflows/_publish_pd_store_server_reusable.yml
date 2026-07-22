@@ -240,6 +240,7 @@ jobs:
         repository: ${{ env.REPOSITORY_URL }}
         ref: ${{ env.SOURCE_SHA }}
         fetch-depth: 2
+        persist-credentials: false
 
     - name: Set up Docker with containerd image store
       uses: docker/setup-docker-action@v5
