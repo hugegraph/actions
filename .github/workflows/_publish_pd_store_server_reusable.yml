@@ -308,6 +308,11 @@ jobs:
     - name: Start compose stack with local images
       if: ${{ inputs.strict_mode }}
       run: |
+        HUGEGRAPH_ADMIN_PASSWORD="$(openssl rand -hex 16)"
+        echo "::add-mask::$HUGEGRAPH_ADMIN_PASSWORD"
+        echo "HUGEGRAPH_ADMIN_PASSWORD=$HUGEGRAPH_ADMIN_PASSWORD" >> "$GITHUB_ENV"
+        export HUGEGRAPH_ADMIN_PASSWORD
+
         if [ -f "docker/docker-compose.dev.yml" ]; then
           compose_file="docker/docker-compose.dev.yml"
         elif [ -f "docker/docker-compose.yml" ]; then
@@ -526,6 +531,7 @@ jobs:
             --compressed \
             --connect-timeout 3 \
             --max-time 30 \
+            --user "admin:$HUGEGRAPH_ADMIN_PASSWORD" \
             -H 'Content-Type: application/json' \
             --data-binary "$payload" \
             http://127.0.0.1:8080/gremlin \
