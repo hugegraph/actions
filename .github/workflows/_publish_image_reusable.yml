@@ -199,8 +199,8 @@ jobs:
         else
           version_tag="${REQUESTED_IMAGE_TAG:-$(echo "$SOURCE_REF" \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)}"
-          if [ -z "$version_tag" ]; then
-            echo "Source ref does not contain a valid version number (x.x.x): $SOURCE_REF"
+          if ! [[ "$version_tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release image_tag: $version_tag. Expected x.y.z."
             exit 1
           fi
           need_update="true"
