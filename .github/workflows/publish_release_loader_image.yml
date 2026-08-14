@@ -27,6 +27,7 @@ jobs:
       mode: release
       component: loader
       source_repository: ${{ inputs.source_repository || 'apache/hugegraph-toolchain' }}
+      allowed_source_repositories: apache/hugegraph-toolchain,hugegraph/hugegraph-toolchain
       source_ref: ${{ inputs.source_ref }}
       image_tag: ${{ inputs.image_tag || '' }}
       publish: true

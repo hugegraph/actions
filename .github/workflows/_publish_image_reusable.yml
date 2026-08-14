@@ -15,9 +15,18 @@ on:
         description: "source repository in owner/name format"
         required: true
         type: string
+      allowed_source_repositories:
+        description: "comma-separated trusted source repositories"
+        required: true
+        type: string
       source_ref:
         description: "source branch, tag, or commit"
         required: true
+        type: string
+      default_source:
+        description: "default source in owner/name@ref format"
+        required: false
+        default: ''
         type: string
       image_tag:
         description: "published image tag; empty derives from mode and source ref"
@@ -91,7 +100,9 @@ jobs:
       env:
         MODE: ${{ inputs.mode }}
         SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+        ALLOWED_SOURCE_REPOSITORIES: ${{ inputs.allowed_source_repositories }}
         SOURCE_REF: ${{ inputs.source_ref }}
+        DEFAULT_SOURCE: ${{ inputs.default_source }}
         REQUESTED_IMAGE_TAG: ${{ inputs.image_tag }}
         PUBLISH: ${{ inputs.publish }}
         ENABLE_HASH_GATE: ${{ inputs.enable_hash_gate }}
@@ -102,6 +113,27 @@ jobs:
         if [ "$MODE" != "latest" ] && [ "$MODE" != "release" ]; then
           echo "Invalid mode: $MODE. Expected latest or release."
           exit 1
+        fi
+
+        source_repository_allowed="false"
+        IFS=',' read -ra allowed_repositories <<< "$ALLOWED_SOURCE_REPOSITORIES"
+        for allowed_repository in "${allowed_repositories[@]}"; do
+          if [ "$SOURCE_REPOSITORY" = "$allowed_repository" ]; then
+            source_repository_allowed="true"
+            break
+          fi
+        done
+        if [ "$source_repository_allowed" != "true" ]; then
+          echo "Source repository is not allowed: $SOURCE_REPOSITORY"
+          exit 1
+        fi
+
+        if ! [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          if ! git check-ref-format "refs/heads/$SOURCE_REF" >/dev/null 2>&1 \
+            && ! git check-ref-format "refs/tags/$SOURCE_REF" >/dev/null 2>&1; then
+            echo "Invalid source ref: $SOURCE_REF"
+            exit 1
+          fi
         fi
 
         source_url="https://github.com/${SOURCE_REPOSITORY}.git"
@@ -136,7 +168,11 @@ jobs:
               | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[.-]+//; s/[.-]+$//' \
               | cut -c1-110
             )"
-            if [ "$SOURCE_REF" = "master" ] || [ "$SOURCE_REF" = "main" ]; then
+            default_repository="${DEFAULT_SOURCE%@*}"
+            default_ref="${DEFAULT_SOURCE#*@}"
+            if [ -n "$DEFAULT_SOURCE" ] \
+              && [ "$SOURCE_REPOSITORY" = "$default_repository" ] \
+              && [ "$SOURCE_REF" = "$default_ref" ]; then
               version_tag="latest"
             fi
           fi
@@ -214,7 +250,14 @@ jobs:
         if [ -n "$REGISTRY_CACHE_IMAGE" ]; then
           cache_image="$REGISTRY_CACHE_IMAGE"
           if [ "$MODE" = "latest" ] && [ "$VERSION_TAG" != "latest" ]; then
-            cache_image="${REGISTRY_CACHE_IMAGE%:buildcache-latest}:buildcache-${VERSION_TAG}"
+            cache_channel="$VERSION_TAG"
+            if [ "${#cache_channel}" -gt 117 ]; then
+              cache_hash="$(printf '%s' "$cache_channel" | sha256sum | cut -c1-12)"
+              cache_channel="${cache_channel:0:104}-${cache_hash}"
+            fi
+            if [ "$PUBLISH_IMAGES" = "true" ]; then
+              cache_image="${REGISTRY_CACHE_IMAGE%:buildcache-latest}:buildcache-${cache_channel}"
+            fi
           fi
           cache_from="type=registry,ref=${cache_image}"
           cache_to_min="type=registry,ref=${cache_image},mode=min"
@@ -225,6 +268,11 @@ jobs:
           cache_to_min="type=gha,scope=${cache_scope},mode=min"
           cache_to_max="type=gha,scope=${cache_scope},mode=max"
           cache_backend="gha"
+        fi
+
+        cache_reference="$cache_image"
+        if [ "$cache_backend" = "gha" ]; then
+          cache_reference="$cache_scope"
         fi
 
         if [ "$PUBLISH_IMAGES" != "true" ]; then
@@ -247,7 +295,7 @@ jobs:
           echo
           echo "| Image | Platforms | Cache backend | Cache reference |"
           echo "| --- | --- | --- | --- |"
-          echo "| \`${image_url}\` | \`${platforms}\` | \`${cache_backend}\` | \`${REGISTRY_CACHE_IMAGE:-$cache_scope}\` |"
+          echo "| \`${image_url}\` | \`${platforms}\` | \`${cache_backend}\` | \`${cache_reference}\` |"
           echo
           echo "- Publish images: \`${PUBLISH_IMAGES}\`"
         } >> "$GITHUB_STEP_SUMMARY"
@@ -258,6 +306,7 @@ jobs:
         repository: ${{ inputs.source_repository }}
         ref: ${{ needs.prepare.outputs.checkout_ref }}
         fetch-depth: 2
+        persist-credentials: false
 
     - name: Set up QEMU (${{ matrix.module }})
       if: ${{ contains(steps.params.outputs.platforms, 'arm64') }}

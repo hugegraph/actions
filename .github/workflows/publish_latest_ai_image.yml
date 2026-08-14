@@ -12,11 +12,11 @@ on:
       source_ref:
         required: false
         default: 'main'
-        description: 'source branch or tag; non-default refs run validation unless publish is enabled'
+        description: 'source branch, tag, or commit; non-default refs validate unless publish is enabled'
       image_tag:
         required: false
         default: ''
-        description: 'image tag; empty keeps the latest tag'
+        description: 'image tag; empty uses latest only for the default source, otherwise derives from source ref'
       publish:
         type: boolean
         required: false
@@ -30,9 +30,11 @@ jobs:
       mode: latest
       component: ai
       source_repository: ${{ inputs.source_repository || 'apache/hugegraph-ai' }}
+      allowed_source_repositories: apache/hugegraph-ai,hugegraph/hugegraph-ai
       source_ref: ${{ inputs.source_ref || 'main' }}
+      default_source: apache/hugegraph-ai@main
       image_tag: ${{ inputs.image_tag || '' }}
-      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true || (inputs.source_ref || 'main') == 'main' }}
+      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
       # IMPORTANT:
       # - Keep ARM enabled for normal RAG image (Dockerfile.llm).
       # - Keep rag-bin (Dockerfile.nk) on amd64 only due to arm incompatibility.
@@ -61,7 +63,7 @@ jobs:
             "smoke_test": false
           }
         ]
-      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || (inputs.source_ref || 'main') == 'main' }}
+      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph-ai') == 'apache/hugegraph-ai' && (inputs.source_ref || 'main') == 'main' && (inputs.image_tag || '') == '') }}
       last_hash_value: ${{ vars.LAST_AI_HASH }}
       last_hash_name: LAST_AI_HASH
       hash_repo_owner: hugegraph

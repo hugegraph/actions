@@ -43,8 +43,8 @@ The two publishing modes behave differently:
 - `release` mode
   - manual publish from an explicitly selected source ref
   - always publishes when invoked
-  - uses an explicit `image_tag`, independent from the source ref (for
-    example, source `master` can publish tag `1.7.0`)
+  - uses `image_tag` when provided; standard images otherwise derive `x.y.z`
+    from the source ref (PD/Store/Server requires an explicit `x.y.z` tag)
 
 ## Multi-Platform Build Performance
 
@@ -216,14 +216,20 @@ gate remains a TODO for a larger runner or a reliable lower-resource simulation.
 Wrapper workflows provide the common source and publication contract:
 
 - `source_repository`: source repository in `owner/name` format
+- `allowed_source_repositories`: comma-separated trusted repositories accepted by the wrapper
 - `source_ref`: source branch, tag, or commit
-- `image_tag`: optional image tag; when omitted, latest/release mode derives it
+- `image_tag`: optional image tag; the configured default source uses `latest`, other latest refs derive a tag, and release mode derives or validates a version
 - `publish`: whether to push images and registry caches
+
+Only the component's Apache and HugeGraph source repositories are accepted by
+the built-in wrappers. Manual runs always respect `publish`; scheduled runs
+enable it automatically. Latest hash gating is limited to the configured
+default source with no explicit `image_tag`.
 
 Standard wrappers may also pass `build_matrix_json`; the specialized
 pd/store/server workflow defines its four image builds directly. Manual latest
-dispatches default to validation for non-default refs; set `publish=true` and
-provide `image_tag` to publish a branch build such as `helm-dev`.
+dispatches default to validation for every ref; set `publish=true` and provide
+`image_tag` to publish a branch build such as `helm-dev`.
 
 ## How To Extend
 

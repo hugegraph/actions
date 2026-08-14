@@ -12,9 +12,18 @@ on:
         required: false
         default: apache/hugegraph
         type: string
+      allowed_source_repositories:
+        description: "comma-separated trusted source repositories"
+        required: true
+        type: string
       source_ref:
         description: "source branch, tag, or commit"
         required: true
+        type: string
+      default_source:
+        description: "default source in owner/name@ref format"
+        required: false
+        default: ''
         type: string
       image_tag:
         description: "published image tag; empty derives from mode and source ref"
@@ -94,7 +103,9 @@ jobs:
       env:
         MODE: ${{ inputs.mode }}
         SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+        ALLOWED_SOURCE_REPOSITORIES: ${{ inputs.allowed_source_repositories }}
         SOURCE_REF: ${{ inputs.source_ref }}
+        DEFAULT_SOURCE: ${{ inputs.default_source }}
         REQUESTED_IMAGE_TAG: ${{ inputs.image_tag }}
         PUBLISH: ${{ inputs.publish }}
         ENABLE_HASH_GATE: ${{ inputs.enable_hash_gate }}
@@ -110,6 +121,27 @@ jobs:
         if [ "$MODE" = "release" ] && [ "$DRY_RUN" = "true" ]; then
           echo "dry_run is only supported by latest mode"
           exit 1
+        fi
+
+        source_repository_allowed="false"
+        IFS=',' read -ra allowed_repositories <<< "$ALLOWED_SOURCE_REPOSITORIES"
+        for allowed_repository in "${allowed_repositories[@]}"; do
+          if [ "$SOURCE_REPOSITORY" = "$allowed_repository" ]; then
+            source_repository_allowed="true"
+            break
+          fi
+        done
+        if [ "$source_repository_allowed" != "true" ]; then
+          echo "Source repository is not allowed: $SOURCE_REPOSITORY"
+          exit 1
+        fi
+
+        if ! [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          if ! git check-ref-format "refs/heads/$SOURCE_REF" >/dev/null 2>&1 \
+            && ! git check-ref-format "refs/tags/$SOURCE_REF" >/dev/null 2>&1; then
+            echo "Invalid source ref: $SOURCE_REF"
+            exit 1
+          fi
         fi
 
         source_url="https://github.com/${SOURCE_REPOSITORY}.git"
@@ -145,7 +177,11 @@ jobs:
               echo "Failed to derive an image tag from source ref: $SOURCE_REF"
               exit 1
             fi
-            if [ "$SOURCE_REF" = "master" ]; then
+            default_repository="${DEFAULT_SOURCE%@*}"
+            default_ref="${DEFAULT_SOURCE#*@}"
+            if [ -n "$DEFAULT_SOURCE" ] \
+              && [ "$SOURCE_REPOSITORY" = "$default_repository" ] \
+              && [ "$SOURCE_REF" = "$default_ref" ]; then
               version_tag="latest"
             fi
           fi
@@ -154,6 +190,13 @@ jobs:
             publish_images="false"
           fi
           cache_channel="$version_tag"
+          if [ "${#cache_channel}" -gt 117 ]; then
+            cache_hash="$(printf '%s' "$cache_channel" | sha256sum | cut -c1-12)"
+            cache_channel="${cache_channel:0:104}-${cache_hash}"
+          fi
+          if [ "$publish_images" != "true" ]; then
+            cache_channel="latest"
+          fi
           need_update="true"
           if [ "$DRY_RUN" != "true" ] && [ "$ENABLE_HASH_GATE" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
             need_update="false"

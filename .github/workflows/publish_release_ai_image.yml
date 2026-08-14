@@ -23,6 +23,7 @@ jobs:
       mode: release
       component: ai
       source_repository: ${{ inputs.source_repository || 'apache/hugegraph-ai' }}
+      allowed_source_repositories: apache/hugegraph-ai,hugegraph/hugegraph-ai
       source_ref: ${{ inputs.source_ref }}
       image_tag: ${{ inputs.image_tag || '' }}
       publish: true

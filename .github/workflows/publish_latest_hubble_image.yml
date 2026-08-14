@@ -12,11 +12,11 @@ on:
       source_ref:
         required: false
         default: 'master'
-        description: 'source branch or tag; non-default refs run validation unless publish is enabled'
+        description: 'source branch, tag, or commit; non-default refs validate unless publish is enabled'
       image_tag:
         required: false
         default: ''
-        description: 'image tag; empty keeps the latest tag'
+        description: 'image tag; empty uses latest only for the default source, otherwise derives from source ref'
       publish:
         type: boolean
         required: false
@@ -34,9 +34,11 @@ jobs:
       mode: latest
       component: hubble
       source_repository: ${{ inputs.source_repository || 'apache/hugegraph-toolchain' }}
+      allowed_source_repositories: apache/hugegraph-toolchain,hugegraph/hugegraph-toolchain
       source_ref: ${{ inputs.source_ref || 'master' }}
+      default_source: apache/hugegraph-toolchain@master
       image_tag: ${{ inputs.image_tag || '' }}
-      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true || (inputs.source_ref || 'master') == 'master' }}
+      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
       build_matrix_json: |
         [
           {
@@ -53,7 +55,7 @@ jobs:
         ]
       use_mvn_args: true
       mvn_args: ${{ github.event.inputs.mvn_args || '' }}
-      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || (inputs.source_ref || 'master') == 'master' }}
+      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph-toolchain') == 'apache/hugegraph-toolchain' && (inputs.source_ref || 'master') == 'master' && (inputs.image_tag || '') == '') }}
       last_hash_value: ${{ vars.LAST_HUBBLE_HASH }}
       last_hash_name: LAST_HUBBLE_HASH
       hash_repo_owner: hugegraph

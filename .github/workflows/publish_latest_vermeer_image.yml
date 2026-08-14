@@ -12,11 +12,11 @@ on:
       source_ref:
         required: false
         default: 'master'
-        description: 'source branch or tag; non-default refs run validation unless publish is enabled'
+        description: 'source branch, tag, or commit; non-default refs validate unless publish is enabled'
       image_tag:
         required: false
         default: ''
-        description: 'image tag; empty keeps the latest tag'
+        description: 'image tag; empty uses latest only for the default source, otherwise derives from source ref'
       publish:
         type: boolean
         required: false
@@ -30,9 +30,11 @@ jobs:
       mode: latest
       component: vermeer
       source_repository: ${{ inputs.source_repository || 'apache/hugegraph-computer' }}
+      allowed_source_repositories: apache/hugegraph-computer,hugegraph/hugegraph-computer
       source_ref: ${{ inputs.source_ref || 'master' }}
+      default_source: apache/hugegraph-computer@master
       image_tag: ${{ inputs.image_tag || '' }}
-      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true || (inputs.source_ref || 'master') == 'master' }}
+      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
       build_matrix_json: |
         [
           {
@@ -47,7 +49,7 @@ jobs:
             "smoke_test": false
           }
         ]
-      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || (inputs.source_ref || 'master') == 'master' }}
+      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph-computer') == 'apache/hugegraph-computer' && (inputs.source_ref || 'master') == 'master' && (inputs.image_tag || '') == '') }}
       last_hash_value: ${{ vars.LAST_VERMEER_HASH }}
       last_hash_name: LAST_VERMEER_HASH
       hash_repo_owner: hugegraph
