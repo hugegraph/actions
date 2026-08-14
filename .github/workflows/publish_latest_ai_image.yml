@@ -5,10 +5,23 @@ on:
     - cron: '0 23 * * *'
   workflow_dispatch:
     inputs:
-      latest_source_branch:
+      source_repository:
+        required: false
+        default: 'apache/hugegraph-ai'
+        description: 'source repository in owner/name format'
+      source_ref:
         required: false
         default: 'main'
-        description: 'source branch; non-main branches run read-only validation'
+        description: 'source branch or tag; non-default refs run validation unless publish is enabled'
+      image_tag:
+        required: false
+        default: ''
+        description: 'image tag; empty keeps the latest tag'
+      publish:
+        type: boolean
+        required: false
+        default: false
+        description: 'publish a non-default source ref'
 
 jobs:
   publish:
@@ -16,9 +29,10 @@ jobs:
     with:
       mode: latest
       component: ai
-      repository_url: apache/hugegraph-ai
-      branch: ${{ github.event.inputs.latest_source_branch || 'main' }}
-      validation_only: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.latest_source_branch || 'main') != 'main' }}
+      source_repository: ${{ inputs.source_repository || 'apache/hugegraph-ai' }}
+      source_ref: ${{ inputs.source_ref || 'main' }}
+      image_tag: ${{ inputs.image_tag || '' }}
+      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true || (inputs.source_ref || 'main') == 'main' }}
       # IMPORTANT:
       # - Keep ARM enabled for normal RAG image (Dockerfile.llm).
       # - Keep rag-bin (Dockerfile.nk) on amd64 only due to arm incompatibility.
@@ -47,7 +61,7 @@ jobs:
             "smoke_test": false
           }
         ]
-      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.latest_source_branch || 'main') == 'main' }}
+      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || (inputs.source_ref || 'main') == 'main' }}
       last_hash_value: ${{ vars.LAST_AI_HASH }}
       last_hash_name: LAST_AI_HASH
       hash_repo_owner: hugegraph
