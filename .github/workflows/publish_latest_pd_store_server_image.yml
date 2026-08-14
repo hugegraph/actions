@@ -5,10 +5,23 @@ on:
     - cron: '0 23 * * *'
   workflow_dispatch:
     inputs:
-      latest_source_branch:
+      source_repository:
+        required: false
+        default: 'apache/hugegraph'
+        description: 'source repository in owner/name format'
+      source_ref:
         required: false
         default: 'master'
-        description: 'source branch; non-master branches run read-only validation'
+        description: 'source branch, tag, or commit; non-default refs validate unless publish is enabled'
+      image_tag:
+        required: false
+        default: ''
+        description: 'image tag; empty uses latest only for the default source, otherwise derives from source ref'
+      publish:
+        type: boolean
+        required: false
+        default: false
+        description: 'publish a non-default source ref'
       mvn_args:
         required: false
         default: ''
@@ -37,13 +50,17 @@ jobs:
     uses: ./.github/workflows/_publish_pd_store_server_reusable.yml
     with:
       mode: latest
-      repository_url: apache/hugegraph
-      branch: ${{ github.event.inputs.latest_source_branch || 'master' }}
+      source_repository: ${{ inputs.source_repository || 'apache/hugegraph' }}
+      allowed_source_repositories: apache/hugegraph,hugegraph/hugegraph
+      source_ref: ${{ inputs.source_ref || 'master' }}
+      default_source: apache/hugegraph@master
+      image_tag: ${{ inputs.image_tag || '' }}
+      publish: ${{ (github.event_name != 'workflow_dispatch' || inputs.publish == true) && !(inputs.dry_run == true) }}
       mvn_args: ${{ github.event.inputs.mvn_args || '' }}
-      strict_mode: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.latest_source_branch || 'master') != 'master' || github.event.inputs.strict_mode == true || github.event.inputs.strict_mode == 'true' }}
-      dry_run: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.dry_run == true || github.event.inputs.dry_run == 'true') }}
+      strict_mode: ${{ github.event_name != 'workflow_dispatch' || (inputs.source_ref || 'master') != 'master' || inputs.strict_mode == true }}
+      dry_run: ${{ inputs.dry_run == true }}
       wait_timeout_sec: ${{ github.event.inputs.wait_timeout_sec || '300' }}
-      enable_hash_gate: ${{ (github.event_name != 'workflow_dispatch' || (github.event.inputs.latest_source_branch || 'master') == 'master') && !(github.event.inputs.dry_run == true || github.event.inputs.dry_run == 'true') }}
+      enable_hash_gate: ${{ (github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph') == 'apache/hugegraph' && (inputs.source_ref || 'master') == 'master' && (inputs.image_tag || '') == '')) && !(inputs.dry_run == true) }}
       last_hash_value: ${{ vars.LAST_SERVER_HASH }}
       last_hash_name: LAST_SERVER_HASH
       hash_repo_owner: hugegraph

@@ -3,11 +3,15 @@ name: "Publish pd-store-server image(release)"
 on:
   workflow_dispatch:
     inputs:
-      branch:
+      source_repository:
+        required: false
+        default: 'apache/hugegraph'
+        description: 'source repository in owner/name format'
+      source_ref:
         required: true
         default: 'master'
-        description: 'source branch used to build the release images'
-      version_tag:
+        description: 'source branch, tag, or commit used to build the release images'
+      image_tag:
         required: true
         default: ''
         description: 'image version tag, for example 1.7.0'
@@ -34,9 +38,11 @@ jobs:
     uses: ./.github/workflows/_publish_pd_store_server_reusable.yml
     with:
       mode: release
-      repository_url: apache/hugegraph
-      branch: ${{ inputs.branch }}
-      version_tag: ${{ inputs.version_tag }}
+      source_repository: ${{ inputs.source_repository || 'apache/hugegraph' }}
+      allowed_source_repositories: apache/hugegraph,hugegraph/hugegraph
+      source_ref: ${{ inputs.source_ref }}
+      image_tag: ${{ inputs.image_tag }}
+      publish: true
       mvn_args: ${{ inputs.mvn_args }}
       strict_mode: ${{ inputs.strict_mode }}
       wait_timeout_sec: ${{ inputs.wait_timeout_sec || '300' }}

@@ -5,10 +5,23 @@ on:
     - cron: '0 23 * * *'
   workflow_dispatch:
     inputs:
-      latest_source_branch:
+      source_repository:
+        required: false
+        default: 'apache/hugegraph-toolchain'
+        description: 'source repository in owner/name format'
+      source_ref:
         required: false
         default: 'master'
-        description: 'source branch; non-master branches run read-only validation'
+        description: 'source branch, tag, or commit; non-default refs validate unless publish is enabled'
+      image_tag:
+        required: false
+        default: ''
+        description: 'image tag; empty uses latest only for the default source, otherwise derives from source ref'
+      publish:
+        type: boolean
+        required: false
+        default: false
+        description: 'publish a non-default source ref'
       mvn_args:
         required: false
         default: ''
@@ -20,9 +33,12 @@ jobs:
     with:
       mode: latest
       component: hubble
-      repository_url: apache/hugegraph-toolchain
-      branch: ${{ github.event.inputs.latest_source_branch || 'master' }}
-      validation_only: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.latest_source_branch || 'master') != 'master' }}
+      source_repository: ${{ inputs.source_repository || 'apache/hugegraph-toolchain' }}
+      allowed_source_repositories: apache/hugegraph-toolchain,hugegraph/hugegraph-toolchain
+      source_ref: ${{ inputs.source_ref || 'master' }}
+      default_source: apache/hugegraph-toolchain@master
+      image_tag: ${{ inputs.image_tag || '' }}
+      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
       build_matrix_json: |
         [
           {
@@ -39,7 +55,7 @@ jobs:
         ]
       use_mvn_args: true
       mvn_args: ${{ github.event.inputs.mvn_args || '' }}
-      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || (github.event.inputs.latest_source_branch || 'master') == 'master' }}
+      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph-toolchain') == 'apache/hugegraph-toolchain' && (inputs.source_ref || 'master') == 'master' && (inputs.image_tag || '') == '') }}
       last_hash_value: ${{ vars.LAST_HUBBLE_HASH }}
       last_hash_name: LAST_HUBBLE_HASH
       hash_repo_owner: hugegraph

@@ -11,16 +11,30 @@ on:
         description: "component name for cache scope"
         required: true
         type: string
-      repository_url:
+      source_repository:
         description: "source repository in owner/name format"
         required: true
         type: string
-      branch:
-        description: "source branch name"
+      allowed_source_repositories:
+        description: "comma-separated trusted source repositories"
         required: true
         type: string
-      validation_only:
-        description: "build without image or cache writes"
+      source_ref:
+        description: "source branch, tag, or commit"
+        required: true
+        type: string
+      default_source:
+        description: "default source in owner/name@ref format"
+        required: false
+        default: ''
+        type: string
+      image_tag:
+        description: "published image tag; empty derives from mode and source ref"
+        required: false
+        default: ''
+        type: string
+      publish:
+        description: "publish images and registry caches"
         required: false
         default: false
         type: boolean
@@ -80,15 +94,19 @@ jobs:
       checkout_ref: ${{ steps.prepare.outputs.checkout_ref }}
       version_tag: ${{ steps.prepare.outputs.version_tag }}
       publish_images: ${{ steps.prepare.outputs.publish_images }}
+      hash_gate_applied: ${{ steps.prepare.outputs.hash_gate_applied }}
     steps:
     - name: Resolve mode and source ref
       id: prepare
       env:
         MODE: ${{ inputs.mode }}
-        REPOSITORY_URL: ${{ inputs.repository_url }}
-        BRANCH: ${{ inputs.branch }}
+        SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+        ALLOWED_SOURCE_REPOSITORIES: ${{ inputs.allowed_source_repositories }}
+        SOURCE_REF: ${{ inputs.source_ref }}
+        DEFAULT_SOURCE: ${{ inputs.default_source }}
+        REQUESTED_IMAGE_TAG: ${{ inputs.image_tag }}
+        PUBLISH: ${{ inputs.publish }}
         ENABLE_HASH_GATE: ${{ inputs.enable_hash_gate }}
-        VALIDATION_ONLY: ${{ inputs.validation_only }}
         LAST_HASH_VALUE: ${{ inputs.last_hash_value }}
       run: |
         set -euo pipefail
@@ -98,31 +116,110 @@ jobs:
           exit 1
         fi
 
-        source_sha="$(git ls-remote "https://github.com/${REPOSITORY_URL}.git" "refs/heads/${BRANCH}" | awk '{print $1}')"
+        source_repository_allowed="false"
+        IFS=',' read -ra allowed_repositories <<< "$ALLOWED_SOURCE_REPOSITORIES"
+        for allowed_repository in "${allowed_repositories[@]}"; do
+          if [ "$SOURCE_REPOSITORY" = "$allowed_repository" ]; then
+            source_repository_allowed="true"
+            break
+          fi
+        done
+        if [ "$source_repository_allowed" != "true" ]; then
+          echo "Source repository is not allowed: $SOURCE_REPOSITORY"
+          exit 1
+        fi
+
+        if ! [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          if ! git check-ref-format "refs/heads/$SOURCE_REF" >/dev/null 2>&1 \
+            && ! git check-ref-format "refs/tags/$SOURCE_REF" >/dev/null 2>&1; then
+            echo "Invalid source ref: $SOURCE_REF"
+            exit 1
+          fi
+        fi
+
+        default_repository="${DEFAULT_SOURCE%@*}"
+        default_ref="${DEFAULT_SOURCE#*@}"
+        default_source_match="false"
+        if [ -n "$DEFAULT_SOURCE" ] \
+          && [ "$SOURCE_REPOSITORY" = "$default_repository" ] \
+          && [ "$SOURCE_REF" = "$default_ref" ]; then
+          default_source_match="true"
+        fi
+
+        source_url="https://github.com/${SOURCE_REPOSITORY}.git"
+        source_sha="$(git ls-remote "$source_url" "refs/heads/${SOURCE_REF}" \
+          | awk 'NR == 1 { print $1 }')"
         if [ -z "$source_sha" ]; then
-          echo "Failed to resolve source SHA for ${REPOSITORY_URL}@${BRANCH}"
+          source_sha="$(git ls-remote "$source_url" "refs/tags/${SOURCE_REF}^{}" \
+            | awk 'NR == 1 { print $1 }')"
+        fi
+        if [ -z "$source_sha" ]; then
+          source_sha="$(git ls-remote "$source_url" "refs/tags/${SOURCE_REF}" \
+            | awk 'NR == 1 { print $1 }')"
+        fi
+        if [ -z "$source_sha" ] && [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          source_sha="$SOURCE_REF"
+        fi
+        if [ -z "$source_sha" ]; then
+          echo "Failed to resolve source SHA for ${SOURCE_REPOSITORY}@${SOURCE_REF}"
           exit 1
         fi
 
         checkout_ref="$source_sha"
-        publish_images="true"
-        if [ "$VALIDATION_ONLY" = "true" ]; then
-          publish_images="false"
-        fi
+        publish_images="$PUBLISH"
+        hash_gate_applied="false"
 
         if [ "$MODE" = "latest" ]; then
-          version_tag="latest"
-          need_update="true"
-          if [ "$ENABLE_HASH_GATE" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
-            need_update="false"
+          if [ -n "$REQUESTED_IMAGE_TAG" ]; then
+            version_tag="$REQUESTED_IMAGE_TAG"
+          else
+            version_tag="$(
+              printf '%s' "$SOURCE_REF" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[.-]+//; s/[.-]+$//' \
+              | cut -c1-110
+            )"
+            if [ "$default_source_match" = "true" ]; then
+              version_tag="latest"
+            fi
           fi
-        else
-          version_tag="$(echo "$BRANCH" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
           if [ -z "$version_tag" ]; then
-            echo "Branch name does not contain a valid version number (x.x.x): $BRANCH"
+            echo "Failed to derive an image tag from source ref: $SOURCE_REF"
             exit 1
           fi
           need_update="true"
+          if [ "$PUBLISH" = "true" ] && [ "$ENABLE_HASH_GATE" = "true" ] \
+            && [ -z "$REQUESTED_IMAGE_TAG" ] \
+            && [ "$default_source_match" = "true" ]; then
+            hash_gate_applied="true"
+          fi
+          if [ "$hash_gate_applied" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
+            need_update="false"
+          fi
+        else
+          version_tag="${REQUESTED_IMAGE_TAG:-$(echo "$SOURCE_REF" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)}"
+          if ! [[ "$version_tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release image_tag: $version_tag. Expected x.y.z."
+            exit 1
+          fi
+          need_update="true"
+        fi
+
+        if ! [[ "$version_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+          echo "Invalid image tag: $version_tag"
+          exit 1
+        fi
+        if [ "$MODE" = "latest" ] && [ "$version_tag" = "latest" ] \
+          && [ "$default_source_match" != "true" ]; then
+          echo "The latest tag is reserved for the configured default source"
+          exit 1
+        fi
+        if [ "$MODE" = "latest" ] && [ "$PUBLISH" = "true" ] \
+          && [ "$default_source_match" != "true" ] \
+          && [ -z "$REQUESTED_IMAGE_TAG" ]; then
+          echo "image_tag is required when publishing a non-default source"
+          exit 1
         fi
 
         {
@@ -131,6 +228,7 @@ jobs:
           echo "version_tag=$version_tag"
           echo "publish_images=$publish_images"
           echo "need_update=$need_update"
+          echo "hash_gate_applied=$hash_gate_applied"
         } >> "$GITHUB_OUTPUT"
 
   publish:
@@ -173,10 +271,23 @@ jobs:
         image_url="${image_repo}:${VERSION_TAG}"
         cache_scope="${COMPONENT}-${MODULE}"
 
+        cache_reference="$cache_scope"
         if [ -n "$REGISTRY_CACHE_IMAGE" ]; then
-          cache_from="type=registry,ref=${REGISTRY_CACHE_IMAGE}"
-          cache_to_min="type=registry,ref=${REGISTRY_CACHE_IMAGE},mode=min"
-          cache_to_max="type=registry,ref=${REGISTRY_CACHE_IMAGE},mode=max"
+          cache_image="$REGISTRY_CACHE_IMAGE"
+          if [ "$MODE" = "latest" ] && [ "$VERSION_TAG" != "latest" ]; then
+            cache_channel="$VERSION_TAG"
+            if [ "${#cache_channel}" -gt 117 ]; then
+              cache_hash="$(printf '%s' "$cache_channel" | sha256sum | cut -c1-12)"
+              cache_channel="${cache_channel:0:104}-${cache_hash}"
+            fi
+            if [ "$PUBLISH_IMAGES" = "true" ]; then
+              cache_image="${REGISTRY_CACHE_IMAGE%:buildcache-latest}:buildcache-${cache_channel}"
+            fi
+          fi
+          cache_reference="$cache_image"
+          cache_from="type=registry,ref=${cache_image}"
+          cache_to_min="type=registry,ref=${cache_image},mode=min"
+          cache_to_max="type=registry,ref=${cache_image},mode=max"
           cache_backend="registry"
         else
           cache_from="type=gha,scope=${cache_scope}"
@@ -205,7 +316,7 @@ jobs:
           echo
           echo "| Image | Platforms | Cache backend | Cache reference |"
           echo "| --- | --- | --- | --- |"
-          echo "| \`${image_url}\` | \`${platforms}\` | \`${cache_backend}\` | \`${REGISTRY_CACHE_IMAGE:-$cache_scope}\` |"
+          echo "| \`${image_url}\` | \`${platforms}\` | \`${cache_backend}\` | \`${cache_reference}\` |"
           echo
           echo "- Publish images: \`${PUBLISH_IMAGES}\`"
         } >> "$GITHUB_STEP_SUMMARY"
@@ -213,9 +324,10 @@ jobs:
     - name: Checkout source (${{ matrix.module }})
       uses: actions/checkout@v7
       with:
-        repository: ${{ inputs.repository_url }}
+        repository: ${{ inputs.source_repository }}
         ref: ${{ needs.prepare.outputs.checkout_ref }}
         fetch-depth: 2
+        persist-credentials: false
 
     - name: Set up QEMU (${{ matrix.module }})
       if: ${{ contains(steps.params.outputs.platforms, 'arm64') }}
@@ -227,6 +339,7 @@ jobs:
         version: latest
 
     - name: Login to Docker Hub (${{ matrix.module }})
+      if: ${{ needs.prepare.outputs.publish_images == 'true' }}
       uses: docker/login-action@v4
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -302,7 +415,7 @@ jobs:
 
   update_latest_hash:
     needs: [prepare, publish]
-    if: ${{ inputs.mode == 'latest' && !inputs.validation_only && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish.result == 'success' }}
+    if: ${{ inputs.mode == 'latest' && needs.prepare.outputs.hash_gate_applied == 'true' && needs.prepare.outputs.need_update == 'true' && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
     - name: Validate hash update inputs

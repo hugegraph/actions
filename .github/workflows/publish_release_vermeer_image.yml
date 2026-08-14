@@ -3,10 +3,18 @@ name: "Publish Vermeer Image(release)"
 on:
   workflow_dispatch:
     inputs:
-      branch:
+      source_repository:
+        required: false
+        default: 'apache/hugegraph-computer'
+        description: 'source repository in owner/name format'
+      source_ref:
         required: true
         default: ''
-        description: 'The branch name should be like *-x.x.x, for example release-1.0.0'
+        description: 'source branch, tag, or commit; should contain a release version'
+      image_tag:
+        required: false
+        default: ''
+        description: 'release image tag; empty derives x.y.z from source ref'
 
 jobs:
   publish:
@@ -14,8 +22,11 @@ jobs:
     with:
       mode: release
       component: vermeer
-      repository_url: apache/hugegraph-computer
-      branch: ${{ inputs.branch }}
+      source_repository: ${{ inputs.source_repository || 'apache/hugegraph-computer' }}
+      allowed_source_repositories: apache/hugegraph-computer,hugegraph/hugegraph-computer
+      source_ref: ${{ inputs.source_ref }}
+      image_tag: ${{ inputs.image_tag || '' }}
+      publish: true
       build_matrix_json: |
         [
           {

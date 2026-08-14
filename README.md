@@ -41,10 +41,10 @@ The two publishing modes behave differently:
   - updates the stored `LAST_*_HASH` variable after a successful publish
 
 - `release` mode
-  - manual publish from an explicitly selected source branch
+  - manual publish from an explicitly selected source ref
   - always publishes when invoked
-  - uses an explicit `version_tag`, independent from the source branch (for
-    example, source `master` can publish tag `1.7.0`)
+  - uses `image_tag` when provided; standard images otherwise derive `x.y.z`
+    from the source ref (PD/Store/Server requires an explicit `x.y.z` tag)
 
 ## Multi-Platform Build Performance
 
@@ -86,13 +86,17 @@ reports rather than this design document.
 
 ### Read-Only Branch Validation
 
-Latest wrappers that expose `latest_source_branch` use two execution policies:
+Latest wrappers use two execution policies:
 
 - default branch (`master`, or `main` for AI): publish images, export registry
   caches, create manifests, and update the corresponding `LAST_*_HASH` variable.
-- non-default branch: force validation checks, import existing caches read-only,
-  build all configured platforms, and skip image pushes, cache exports,
-  manifests, and hash updates.
+- non-default ref with `publish=false`: force validation checks, import existing
+  caches read-only, build all configured platforms, and skip image pushes, cache
+  exports, manifests, and hash updates.
+
+Set `publish=true` with an explicit `image_tag` to publish a branch build, for
+example `source_repository=hugegraph/hugegraph`, `source_ref=helm-dev`, and
+`image_tag=helm-dev`.
 
 This allows an upstream Dockerfile branch to be benchmarked before merge without
 changing public images or production cache state.
@@ -129,11 +133,11 @@ profile. These settings are functional-test limits, not production guidance or
 a performance baseline.
 
 ```text
-                       source branch
+                        source ref
                               |
                               v
                          prepare job
-       (resolve source SHA, explicit version tag, hash gate)
+       (resolve source SHA, explicit image tag, hash gate)
                               |
                               v
            build_test_publish_multiarch (one job)
@@ -174,7 +178,7 @@ Although the `latest` and `release` wrappers look similar, they encode different
 
 - `release` is the intentional publication path.
   - It is triggered manually.
-  - Its source `branch` and destination `version_tag` are independent.
+  - Its source `source_ref` and destination `image_tag` are independent.
   - It should run even if the source is unchanged, because the operator is explicitly asking for a release publication.
 
 Most wrappers use [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).
@@ -202,16 +206,31 @@ Reusable workflows are the real implementation layer.
 - build and locally load multi-platform candidates followed by strict low-memory integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
 - import of the Server image's bundled `example.groovy` graph and Gremlin CRUD validation
 - publication of the loaded amd64/arm64 index directly to the final tag
-- independent release source and destination version inputs
+- independent release source ref and destination image tag inputs
 - standalone server smoke test for `hugegraph/hugegraph`
 
 The current precheck intentionally uses a 1 PD + 1 Store + 1 Server topology so
 it fits standard GitHub-hosted runners. A full 3 PD + 3 Store + 3 Server compose
 gate remains a TODO for a larger runner or a reliable lower-resource simulation.
 
-Wrapper workflows provide the source repository, branch, and mode-specific inputs.
+Wrapper workflows provide the common source and publication contract:
+
+- `source_repository`: source repository in `owner/name` format
+- `allowed_source_repositories`: comma-separated trusted repositories accepted by the wrapper
+- `source_ref`: source branch, tag, or commit
+- `image_tag`: optional image tag; the configured default source uses `latest`, other latest refs derive a tag, and release mode derives or validates a version
+- `publish`: whether to push images and registry caches
+
+Only the component's Apache and HugeGraph source repositories are accepted by
+the built-in wrappers. Manual runs always respect `publish`; scheduled runs
+enable it automatically. Latest hash gating is limited to the configured
+default source with no explicit `image_tag`.
+
 Standard wrappers may also pass `build_matrix_json`; the specialized
-pd/store/server workflow defines its four image builds directly.
+pd/store/server workflow defines its four image builds directly. Manual latest
+dispatches default to validation for every ref; set `publish=true` and provide
+`image_tag` to publish a branch build such as `helm-dev`. The `latest` tag is
+reserved for the configured default source.
 
 ## How To Extend
 
@@ -264,9 +283,9 @@ For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.g
 ## Practical Notes
 
 - `latest` workflows typically run on a schedule and accept manual dispatch.
-- `release` workflows typically accept only manual dispatch. The specialized
-  pd/store/server release wrapper accepts both a source `branch` and an
-  independent `version_tag`.
+- `release` workflows typically accept only manual dispatch. They use the same
+  `source_repository` / `source_ref` contract and accept an optional
+  independent `image_tag`.
 - Most image workflows inherit credentials and settings through a reusable workflow.
 - If you change shared standard behavior, update `_publish_image_reusable.yml` first.
 - If you change pd/store/server behavior, update `_publish_pd_store_server_reusable.yml` first.
