@@ -8,38 +8,28 @@ on:
       source_repository:
         required: false
         default: 'apache/hugegraph'
-        description: 'source repository in owner/name format'
+        description: 'Source repo owner/name'
       source_ref:
         required: false
         default: 'master'
-        description: 'source branch, tag, or commit; non-default refs validate unless publish is enabled'
+        description: 'Source branch/tag/commit'
       image_tag:
         required: false
         default: ''
-        description: 'image tag; empty uses latest only for the default source, otherwise derives from source ref'
+        description: 'Docker image tag'
       publish:
         type: boolean
         required: false
         default: false
-        description: 'publish a non-default source ref'
+        description: 'Push images to Dockerhub'
       mvn_args:
         required: false
         default: ''
-        description: 'mvn build args, like "MAVEN_ARGS=-P stage"'
-      strict_mode:
-        type: boolean
-        required: false
-        default: true
-        description: 'whether integration precheck is mandatory before publish'
-      dry_run:
-        type: boolean
-        required: false
-        default: false
-        description: 'build and validate master without publishing images or updating the hash'
+        description: 'Optional Maven build args'
       wait_timeout_sec:
         required: false
         default: '300'
-        description: 'docker compose wait timeout in seconds for precheck/self-check'
+        description: 'Precheck timeout in seconds'
 
 concurrency:
   group: publish-latest-pd-store-server
@@ -55,12 +45,12 @@ jobs:
       source_ref: ${{ inputs.source_ref || 'master' }}
       default_source: apache/hugegraph@master
       image_tag: ${{ inputs.image_tag || '' }}
-      publish: ${{ (github.event_name != 'workflow_dispatch' || inputs.publish == true) && !(inputs.dry_run == true) }}
+      publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
       mvn_args: ${{ github.event.inputs.mvn_args || '' }}
-      strict_mode: ${{ github.event_name != 'workflow_dispatch' || (inputs.source_ref || 'master') != 'master' || inputs.strict_mode == true }}
-      dry_run: ${{ inputs.dry_run == true }}
+      strict_mode: true
+      dry_run: false
       wait_timeout_sec: ${{ github.event.inputs.wait_timeout_sec || '300' }}
-      enable_hash_gate: ${{ (github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph') == 'apache/hugegraph' && (inputs.source_ref || 'master') == 'master' && (inputs.image_tag || '') == '')) && !(inputs.dry_run == true) }}
+      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph') == 'apache/hugegraph' && (inputs.source_ref || 'master') == 'master' && (inputs.image_tag || '') == '') }}
       last_hash_value: ${{ vars.LAST_SERVER_HASH }}
       last_hash_name: LAST_SERVER_HASH
       hash_repo_owner: hugegraph
