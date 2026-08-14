@@ -10,7 +10,7 @@ on:
       source_ref:
         required: true
         default: 'master'
-        description: 'source branch or tag used to build the release images'
+        description: 'source branch, tag, or commit used to build the release images'
       image_tag:
         required: true
         default: ''

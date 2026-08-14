@@ -10,7 +10,7 @@ on:
       source_ref:
         required: true
         default: ''
-        description: 'source branch or tag; should contain a release version'
+        description: 'source branch, tag, or commit; should contain a release version'
       image_tag:
         required: false
         default: ''

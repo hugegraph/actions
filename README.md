@@ -229,7 +229,8 @@ default source with no explicit `image_tag`.
 Standard wrappers may also pass `build_matrix_json`; the specialized
 pd/store/server workflow defines its four image builds directly. Manual latest
 dispatches default to validation for every ref; set `publish=true` and provide
-`image_tag` to publish a branch build such as `helm-dev`.
+`image_tag` to publish a branch build such as `helm-dev`. The `latest` tag is
+reserved for the configured default source.
 
 ## How To Extend
 

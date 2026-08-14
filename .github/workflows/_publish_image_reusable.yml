@@ -36,7 +36,7 @@ on:
       publish:
         description: "publish images and registry caches"
         required: false
-        default: true
+        default: false
         type: boolean
       build_matrix_json:
         description: "build matrix JSON array"
@@ -94,6 +94,7 @@ jobs:
       checkout_ref: ${{ steps.prepare.outputs.checkout_ref }}
       version_tag: ${{ steps.prepare.outputs.version_tag }}
       publish_images: ${{ steps.prepare.outputs.publish_images }}
+      hash_gate_applied: ${{ steps.prepare.outputs.hash_gate_applied }}
     steps:
     - name: Resolve mode and source ref
       id: prepare
@@ -136,6 +137,15 @@ jobs:
           fi
         fi
 
+        default_repository="${DEFAULT_SOURCE%@*}"
+        default_ref="${DEFAULT_SOURCE#*@}"
+        default_source_match="false"
+        if [ -n "$DEFAULT_SOURCE" ] \
+          && [ "$SOURCE_REPOSITORY" = "$default_repository" ] \
+          && [ "$SOURCE_REF" = "$default_ref" ]; then
+          default_source_match="true"
+        fi
+
         source_url="https://github.com/${SOURCE_REPOSITORY}.git"
         source_sha="$(git ls-remote "$source_url" "refs/heads/${SOURCE_REF}" \
           | awk 'NR == 1 { print $1 }')"
@@ -157,6 +167,7 @@ jobs:
 
         checkout_ref="$source_sha"
         publish_images="$PUBLISH"
+        hash_gate_applied="false"
 
         if [ "$MODE" = "latest" ]; then
           if [ -n "$REQUESTED_IMAGE_TAG" ]; then
@@ -168,11 +179,7 @@ jobs:
               | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[.-]+//; s/[.-]+$//' \
               | cut -c1-110
             )"
-            default_repository="${DEFAULT_SOURCE%@*}"
-            default_ref="${DEFAULT_SOURCE#*@}"
-            if [ -n "$DEFAULT_SOURCE" ] \
-              && [ "$SOURCE_REPOSITORY" = "$default_repository" ] \
-              && [ "$SOURCE_REF" = "$default_ref" ]; then
+            if [ "$default_source_match" = "true" ]; then
               version_tag="latest"
             fi
           fi
@@ -181,7 +188,12 @@ jobs:
             exit 1
           fi
           need_update="true"
-          if [ "$ENABLE_HASH_GATE" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
+          if [ "$PUBLISH" = "true" ] && [ "$ENABLE_HASH_GATE" = "true" ] \
+            && [ -z "$REQUESTED_IMAGE_TAG" ] \
+            && [ "$default_source_match" = "true" ]; then
+            hash_gate_applied="true"
+          fi
+          if [ "$hash_gate_applied" = "true" ] && [ "$source_sha" = "$LAST_HASH_VALUE" ]; then
             need_update="false"
           fi
         else
@@ -198,6 +210,17 @@ jobs:
           echo "Invalid image tag: $version_tag"
           exit 1
         fi
+        if [ "$MODE" = "latest" ] && [ "$version_tag" = "latest" ] \
+          && [ "$default_source_match" != "true" ]; then
+          echo "The latest tag is reserved for the configured default source"
+          exit 1
+        fi
+        if [ "$MODE" = "latest" ] && [ "$PUBLISH" = "true" ] \
+          && [ "$default_source_match" != "true" ] \
+          && [ -z "$REQUESTED_IMAGE_TAG" ]; then
+          echo "image_tag is required when publishing a non-default source"
+          exit 1
+        fi
 
         {
           echo "source_sha=$source_sha"
@@ -205,6 +228,7 @@ jobs:
           echo "version_tag=$version_tag"
           echo "publish_images=$publish_images"
           echo "need_update=$need_update"
+          echo "hash_gate_applied=$hash_gate_applied"
         } >> "$GITHUB_OUTPUT"
 
   publish:
@@ -247,6 +271,7 @@ jobs:
         image_url="${image_repo}:${VERSION_TAG}"
         cache_scope="${COMPONENT}-${MODULE}"
 
+        cache_reference="$cache_scope"
         if [ -n "$REGISTRY_CACHE_IMAGE" ]; then
           cache_image="$REGISTRY_CACHE_IMAGE"
           if [ "$MODE" = "latest" ] && [ "$VERSION_TAG" != "latest" ]; then
@@ -259,6 +284,7 @@ jobs:
               cache_image="${REGISTRY_CACHE_IMAGE%:buildcache-latest}:buildcache-${cache_channel}"
             fi
           fi
+          cache_reference="$cache_image"
           cache_from="type=registry,ref=${cache_image}"
           cache_to_min="type=registry,ref=${cache_image},mode=min"
           cache_to_max="type=registry,ref=${cache_image},mode=max"
@@ -268,11 +294,6 @@ jobs:
           cache_to_min="type=gha,scope=${cache_scope},mode=min"
           cache_to_max="type=gha,scope=${cache_scope},mode=max"
           cache_backend="gha"
-        fi
-
-        cache_reference="$cache_image"
-        if [ "$cache_backend" = "gha" ]; then
-          cache_reference="$cache_scope"
         fi
 
         if [ "$PUBLISH_IMAGES" != "true" ]; then
@@ -318,6 +339,7 @@ jobs:
         version: latest
 
     - name: Login to Docker Hub (${{ matrix.module }})
+      if: ${{ needs.prepare.outputs.publish_images == 'true' }}
       uses: docker/login-action@v4
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -393,7 +415,7 @@ jobs:
 
   update_latest_hash:
     needs: [prepare, publish]
-    if: ${{ inputs.mode == 'latest' && inputs.publish && inputs.enable_hash_gate && needs.prepare.outputs.need_update == 'true' && needs.publish.result == 'success' }}
+    if: ${{ inputs.mode == 'latest' && needs.prepare.outputs.hash_gate_applied == 'true' && needs.prepare.outputs.need_update == 'true' && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
     - name: Validate hash update inputs
