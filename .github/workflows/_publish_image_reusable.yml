@@ -210,11 +210,6 @@ jobs:
           echo "Invalid image tag: $version_tag"
           exit 1
         fi
-        if [ "$MODE" = "latest" ] && [ "$version_tag" = "latest" ] \
-          && [ "$default_source_match" != "true" ]; then
-          echo "The latest tag is reserved for the configured default source"
-          exit 1
-        fi
         if [ "$MODE" = "latest" ] && [ "$PUBLISH" = "true" ] \
           && [ "$default_source_match" != "true" ] \
           && [ -z "$REQUESTED_IMAGE_TAG" ]; then

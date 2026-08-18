@@ -218,7 +218,7 @@ Wrapper workflows provide the common source and publication contract:
 - `source_repository`: source repository in `owner/name` format
 - `allowed_source_repositories`: comma-separated trusted repositories accepted by the wrapper
 - `source_ref`: source branch, tag, or commit
-- `image_tag`: optional image tag; the configured default source uses `latest`, other latest refs derive a tag, and release mode derives or validates a version
+- `image_tag`: optional image tag; the configured default source uses `latest`, other latest refs derive a tag when omitted, and release mode derives or validates a version
 - `publish`: whether to push images and registry caches
 
 Only the component's Apache and HugeGraph source repositories are accepted by
@@ -229,8 +229,8 @@ default source with no explicit `image_tag`.
 Standard wrappers may also pass `build_matrix_json`; the specialized
 pd/store/server workflow defines its four image builds directly. Manual latest
 dispatches default to validation for every ref; set `publish=true` and provide
-`image_tag` to publish a branch build such as `helm-dev`. The `latest` tag is
-reserved for the configured default source.
+`image_tag` to publish a branch build such as `helm-dev`. An explicit
+`image_tag=latest` is also allowed for a non-default source.
 
 ## How To Extend
 
