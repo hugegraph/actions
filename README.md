@@ -113,6 +113,10 @@ hash updates.
 
 One candidate job builds PD, Store, HStore Server, and standalone Server as
 amd64/arm64 images and loads both variants into Docker's containerd image store.
+Source revisions that provide `docker-bake.hcl` use one shared BuildKit graph:
+the native Maven stage runs once, the four target-platform runtime images fan
+out in parallel, and one shared registry cache is exported. Older source
+revisions keep the serial per-Dockerfile compatibility path.
 It starts the upstream `docker/docker-compose.dev.yml` topology with
 `pull_policy: never`, and runs a functional graph check before any image is
 published. Compatible source revisions that have the same service contract but
@@ -141,9 +145,11 @@ a performance baseline.
                               |
                               v
            build_test_publish_multiarch (one job)
-         +-------------------------------------------------+
+                  shared Maven build stage
+                              |
+         +--------------------+----------------------------+
          | pd | store | server-hstore | server-standalone |
-         +-------------------------------------------------+
+         +--------------------+----------------------------+
         build and load linux/amd64 + linux/arm64 variants
        low-memory compose + bundled graph + Gremlin CRUD
                     standalone smoke test
@@ -164,6 +170,8 @@ Execution note:
 - All four current Dockerfiles use `FROM --platform=$BUILDPLATFORM` for their
   portable build stages. The x86 runner therefore performs Maven work natively
   and limits QEMU to ARM target-image runtime steps.
+- Compatible source revisions use `docker-bake.hcl` to deduplicate that native
+  Maven stage and export it once as `hugegraph/hugegraph:shared-<channel>`.
 - The single job shares checkout, Docker, QEMU, Buildx, and login setup. Dry-runs
   read existing caches but never export new ones.
 

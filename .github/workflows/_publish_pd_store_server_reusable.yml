@@ -254,7 +254,7 @@ jobs:
         {
           echo "## PD / Store / Server image build"
           echo
-          echo "- Cache backend: Docker Hub registry (BuildKit, mode=max)"
+          echo "- Cache backend: Docker Hub registry (BuildKit)"
           echo "- Cache channel: \`$CACHE_CHANNEL\`"
           echo "- Publish images: \`$PUBLISH_IMAGES\`"
           echo "- Dry run: \`$DRY_RUN\`"
@@ -263,9 +263,10 @@ jobs:
           else
             echo "- Cache policy: read-only validation (no registry exports)"
           fi
-          echo "- Build strategy: one x86 job loads amd64/arm64 images into the containerd image store"
+          echo "- Build strategy: shared Bake graph when supported, serial compatibility fallback otherwise"
           echo "- Test platform: locally loaded amd64 variants from the final multi-platform tags"
-          echo "- Shared per-module caches: \`buildcache-$CACHE_CHANNEL\`"
+          echo "- Shared build cache: \`hugegraph/hugegraph:shared-$CACHE_CHANNEL\`"
+          echo "- Compatibility caches: \`buildcache-$CACHE_CHANNEL\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
   build_test_publish_multiarch:
@@ -331,8 +332,11 @@ jobs:
         docker builder prune -af || true
 
     - name: Build multi-platform candidates with retries
+      id: build
       run: |
         set -euo pipefail
+
+        build_started_at="$(date +%s)"
 
         build_candidate() {
           local module="$1" image="$2" dockerfile="$3" cache_repo="$4"
@@ -349,6 +353,7 @@ jobs:
               --tag "$image"
               --cache-from "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL}"
               --load
+              --build-arg "SOURCE_REVISION=${SOURCE_SHA}"
             )
             if [ "$PUBLISH_IMAGES" = "true" ]; then
               build_command+=(
@@ -379,10 +384,55 @@ jobs:
           fi
         }
 
-        build_candidate pd "$PD_IMAGE" ./hugegraph-pd/Dockerfile hugegraph/pd
-        build_candidate store "$STORE_IMAGE" ./hugegraph-store/Dockerfile hugegraph/store
-        build_candidate server-hstore "$HSTORE_IMAGE" ./hugegraph-server/Dockerfile-hstore hugegraph/server
-        build_candidate server-standalone "$STANDALONE_IMAGE" ./hugegraph-server/Dockerfile hugegraph/hugegraph
+        if [ -f docker-bake.hcl ]; then
+          echo "Using source-provided shared Buildx Bake graph"
+          built="false"
+          for attempt in 1 2 3; do
+            echo "Building all candidates with Bake (attempt ${attempt}/3) at $(date -u +%FT%TZ)"
+            if docker buildx bake --file docker-bake.hcl --progress=plain; then
+              built="true"
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Bake failed; retrying with completed BuildKit layers"
+              sleep $((attempt * 5))
+            fi
+          done
+          if [ "$built" != "true" ]; then
+            echo "Failed to build candidates with Bake after 3 attempts"
+            exit 1
+          fi
+        else
+          echo "docker-bake.hcl is unavailable; using serial compatibility build"
+          build_candidate pd "$PD_IMAGE" ./hugegraph-pd/Dockerfile hugegraph/pd
+          build_candidate store "$STORE_IMAGE" ./hugegraph-store/Dockerfile hugegraph/store
+          build_candidate server-hstore "$HSTORE_IMAGE" ./hugegraph-server/Dockerfile-hstore hugegraph/server
+          build_candidate server-standalone "$STANDALONE_IMAGE" ./hugegraph-server/Dockerfile hugegraph/hugegraph
+        fi
+
+        build_duration_seconds="$(( $(date +%s) - build_started_at ))"
+        echo "build_duration_seconds=$build_duration_seconds" >> "$GITHUB_OUTPUT"
+        echo "Built all multi-platform candidates in ${build_duration_seconds}s"
+      env:
+        IMAGE_TAG: ${{ needs.prepare.outputs.version_tag }}
+        SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
+        EXPORT_CACHE: ${{ needs.prepare.outputs.publish_images }}
+
+    - name: Summarize candidate build timing
+      env:
+        BUILD_DURATION_SECONDS: ${{ steps.build.outputs.build_duration_seconds }}
+      run: |
+        {
+          echo
+          echo "## Candidate build timing"
+          echo
+          echo "- Duration: \`${BUILD_DURATION_SECONDS}s\`"
+          if [ -f docker-bake.hcl ]; then
+            echo "- Strategy: shared Buildx Bake graph"
+          else
+            echo "- Strategy: serial compatibility fallback"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Verify locally loaded platform variants
       run: |
