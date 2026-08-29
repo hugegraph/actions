@@ -369,11 +369,17 @@ jobs:
               registry_cache("hugegraph/hugegraph:shared-" + $cache_channel),
               registry_cache($legacy_cache + $cache_channel)
             ] and
-            ((.["cache-to"] // []) == []) and
+            ((.["cache-to"] // []) == (if $export_cache then [
+              {
+                mode: "min",
+                ref: ($legacy_cache + $cache_channel),
+                type: "registry"
+              }
+            ] else [] end)) and
             .args.SOURCE_REVISION == $source_revision and
             ((keys - [
-              "args", "cache-from", "context", "dockerfile", "output",
-              "platforms", "tags"
+              "args", "cache-from", "cache-to", "context", "dockerfile",
+              "output", "platforms", "tags"
             ]) == []);
 
           .group.default.targets == [
