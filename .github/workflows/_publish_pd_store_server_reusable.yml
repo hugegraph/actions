@@ -36,7 +36,7 @@ on:
         default: false
         type: boolean
       mvn_args:
-        description: "mvn build args"
+        description: "Docker build args, one NAME=VALUE entry per line"
         required: false
         default: ''
         type: string
@@ -337,6 +337,19 @@ jobs:
         set -euo pipefail
 
         build_started_at="$(date +%s)"
+        build_args=()
+        while IFS= read -r build_arg; do
+          if [ -z "$build_arg" ]; then
+            continue
+          fi
+          build_arg_name="${build_arg%%=*}"
+          if [ "$build_arg_name" = "$build_arg" ] \
+            || ! [[ "$build_arg_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "Invalid mvn_args entry; expected one NAME=VALUE build argument per line"
+            exit 1
+          fi
+          build_args+=("$build_arg")
+        done <<< "$MVN_ARGS"
 
         build_candidate() {
           local module="$1" image="$2" dockerfile="$3" cache_repo="$4"
@@ -360,11 +373,9 @@ jobs:
                 --cache-to "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL},mode=max"
               )
             fi
-            while IFS= read -r build_arg; do
-              if [ -n "$build_arg" ]; then
-                build_command+=(--build-arg "$build_arg")
-              fi
-            done <<< "$MVN_ARGS"
+            for build_arg in "${build_args[@]}"; do
+              build_command+=(--build-arg "$build_arg")
+            done
             build_command+=(.)
 
             if "${build_command[@]}"; then
@@ -386,10 +397,22 @@ jobs:
 
         if [ -f docker-bake.hcl ]; then
           echo "Using source-provided shared Buildx Bake graph"
+          bake_command=(
+            docker buildx bake
+            --file docker-bake.hcl
+            --progress=plain
+          )
+          for build_arg in "${build_args[@]}"; do
+            build_arg_name="${build_arg%%=*}"
+            bake_command+=(
+              --set "*.args.${build_arg_name}=${build_arg#*=}"
+            )
+          done
+
           built="false"
           for attempt in 1 2 3; do
             echo "Building all candidates with Bake (attempt ${attempt}/3) at $(date -u +%FT%TZ)"
-            if docker buildx bake --file docker-bake.hcl --progress=plain; then
+            if "${bake_command[@]}"; then
               built="true"
               break
             fi

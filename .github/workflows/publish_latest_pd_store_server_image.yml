@@ -25,7 +25,7 @@ on:
       mvn_args:
         required: false
         default: ''
-        description: 'Optional Maven build args'
+        description: 'Docker build args, one NAME=VALUE entry per line'
       wait_timeout_sec:
         required: false
         default: '300'
