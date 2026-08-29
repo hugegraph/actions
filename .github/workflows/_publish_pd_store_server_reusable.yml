@@ -356,7 +356,9 @@ jobs:
               --argjson current "$expected_build_args" \
               --arg name "$build_arg_name" \
               --arg value "${build_arg#*=}" \
-              '$current + {($name): $value}'
+              'def bake_print_value:
+                gsub("\\$\\{"; "$${") | gsub("%\\{"; "%%{");
+              $current + {($name): ($value | bake_print_value)}'
           )"
         done <<< "$MVN_ARGS"
 
