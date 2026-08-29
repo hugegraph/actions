@@ -333,6 +333,7 @@ jobs:
           --file docker-bake.hcl
           --print
         )
+        expected_build_args='{"MAVEN_ARGS":""}'
         while IFS= read -r build_arg; do
           if [ -z "$build_arg" ]; then
             continue
@@ -350,6 +351,13 @@ jobs:
           bake_print_command+=(
             --set "*.args.${build_arg_name}=${build_arg#*=}"
           )
+          expected_build_args="$(
+            jq -cn \
+              --argjson current "$expected_build_args" \
+              --arg name "$build_arg_name" \
+              --arg value "${build_arg#*=}" \
+              '$current + {($name): $value}'
+          )"
         done <<< "$MVN_ARGS"
 
         "${bake_print_command[@]}" > /tmp/hugegraph-bake.json
@@ -357,6 +365,7 @@ jobs:
           --arg source_revision "$SOURCE_REVISION" \
           --arg image_tag "$VERSION_TAG" \
           --arg cache_channel "$CACHE_CHANNEL" \
+          --argjson expected_build_args "$expected_build_args" \
           --argjson export_cache "$EXPORT_CACHE" '
           def registry_cache($ref): {ref: $ref, type: "registry"};
           def runtime_target($dockerfile; $tag; $legacy_cache):
@@ -376,7 +385,9 @@ jobs:
                 type: "registry"
               }
             ] else [] end)) and
-            .args.SOURCE_REVISION == $source_revision and
+            .args == ($expected_build_args + {
+              SOURCE_REVISION: $source_revision
+            }) and
             ((keys - [
               "args", "cache-from", "cache-to", "context", "dockerfile",
               "output", "platforms", "tags"
@@ -405,7 +416,9 @@ jobs:
                 type: "registry"
               }
             ] else [] end)) and
-            .args.SOURCE_REVISION == $source_revision and
+            .args == ($expected_build_args + {
+              SOURCE_REVISION: $source_revision
+            }) and
             ((keys - [
               "args", "cache-from", "cache-to", "context", "dockerfile",
               "output", "platforms", "target"
