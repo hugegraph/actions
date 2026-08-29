@@ -319,6 +319,117 @@ jobs:
       with:
         version: latest
 
+    - name: Validate source-provided Bake graph
+      if: ${{ hashFiles('docker-bake.hcl') != '' }}
+      env:
+        IMAGE_TAG: ${{ needs.prepare.outputs.version_tag }}
+        SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
+        EXPORT_CACHE: ${{ needs.prepare.outputs.publish_images }}
+      run: |
+        set -euo pipefail
+
+        bake_print_command=(
+          docker buildx bake
+          --file docker-bake.hcl
+          --print
+        )
+        while IFS= read -r build_arg; do
+          if [ -z "$build_arg" ]; then
+            continue
+          fi
+          build_arg_name="${build_arg%%=*}"
+          if [ "$build_arg_name" = "$build_arg" ] \
+            || ! [[ "$build_arg_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "Invalid mvn_args entry; expected one NAME=VALUE build argument per line"
+            exit 1
+          fi
+          if [ "$build_arg_name" = "SOURCE_REVISION" ]; then
+            echo "mvn_args must not override reserved build argument SOURCE_REVISION"
+            exit 1
+          fi
+          bake_print_command+=(
+            --set "*.args.${build_arg_name}=${build_arg#*=}"
+          )
+        done <<< "$MVN_ARGS"
+
+        "${bake_print_command[@]}" > /tmp/hugegraph-bake.json
+        jq -e \
+          --arg source_revision "$SOURCE_REVISION" \
+          --arg image_tag "$VERSION_TAG" \
+          --arg cache_channel "$CACHE_CHANNEL" \
+          --argjson export_cache "$EXPORT_CACHE" '
+          def registry_cache($ref): {ref: $ref, type: "registry"};
+          def runtime_target($dockerfile; $tag; $legacy_cache):
+            .context == "." and
+            .dockerfile == $dockerfile and
+            .tags == [$tag] and
+            .platforms == ["linux/amd64", "linux/arm64"] and
+            .output == [{type: "docker"}] and
+            .["cache-from"] == [
+              registry_cache("hugegraph/hugegraph:shared-" + $cache_channel),
+              registry_cache($legacy_cache + $cache_channel)
+            ] and
+            ((.["cache-to"] // []) == []) and
+            .args.SOURCE_REVISION == $source_revision and
+            ((keys - [
+              "args", "cache-from", "context", "dockerfile", "output",
+              "platforms", "tags"
+            ]) == []);
+
+          .group.default.targets == [
+            "build-cache", "pd", "server-hstore", "server-standalone", "store"
+          ] and
+          (.target | keys) == [
+            "build-cache", "pd", "server-hstore", "server-standalone", "store"
+          ] and
+          (.target["build-cache"] |
+            .context == "." and
+            .dockerfile == "hugegraph-pd/Dockerfile" and
+            .target == "build" and
+            .platforms == ["linux/amd64", "linux/arm64"] and
+            .output == [{type: "cacheonly"}] and
+            .["cache-from"] == [
+              registry_cache("hugegraph/hugegraph:shared-" + $cache_channel),
+              registry_cache("hugegraph/pd:buildcache-" + $cache_channel)
+            ] and
+            ((.["cache-to"] // []) == (if $export_cache then [
+              {
+                mode: "max",
+                ref: ("hugegraph/hugegraph:shared-" + $cache_channel),
+                type: "registry"
+              }
+            ] else [] end)) and
+            .args.SOURCE_REVISION == $source_revision and
+            ((keys - [
+              "args", "cache-from", "cache-to", "context", "dockerfile",
+              "output", "platforms", "target"
+            ]) == [])) and
+          (.target.pd |
+            runtime_target(
+              "hugegraph-pd/Dockerfile";
+              "hugegraph/pd:" + $image_tag;
+              "hugegraph/pd:buildcache-"
+            )) and
+          (.target.store |
+            runtime_target(
+              "hugegraph-store/Dockerfile";
+              "hugegraph/store:" + $image_tag;
+              "hugegraph/store:buildcache-"
+            )) and
+          (.target["server-hstore"] |
+            runtime_target(
+              "hugegraph-server/Dockerfile-hstore";
+              "hugegraph/server:" + $image_tag;
+              "hugegraph/server:buildcache-"
+            )) and
+          (.target["server-standalone"] |
+            runtime_target(
+              "hugegraph-server/Dockerfile";
+              "hugegraph/hugegraph:" + $image_tag;
+              "hugegraph/hugegraph:buildcache-"
+            ))
+        ' /tmp/hugegraph-bake.json
+
     - name: Login to Docker Hub
       if: ${{ needs.prepare.outputs.publish_images == 'true' }}
       uses: docker/login-action@v4
@@ -346,6 +457,10 @@ jobs:
           if [ "$build_arg_name" = "$build_arg" ] \
             || ! [[ "$build_arg_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
             echo "Invalid mvn_args entry; expected one NAME=VALUE build argument per line"
+            exit 1
+          fi
+          if [ "$build_arg_name" = "SOURCE_REVISION" ]; then
+            echo "mvn_args must not override reserved build argument SOURCE_REVISION"
             exit 1
           fi
           build_args+=("$build_arg")
