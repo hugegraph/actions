@@ -88,8 +88,9 @@ reports rather than this design document.
 
 Latest wrappers use two execution policies:
 
-- default branch (`master`, or `main` for AI): publish images, export registry
-  caches, create manifests, and update the corresponding `LAST_*_HASH` variable.
+- default branch (`master`, or `main` for AI): publish images, create manifests,
+  and update the corresponding `LAST_*_HASH` variable. General image workflows
+  may export registry caches; the PD/Store/Server flow keeps them read-only.
 - non-default ref with `publish=false`: force validation checks, import existing
   caches read-only, build all configured platforms, and skip image pushes, cache
   exports, manifests, and hash updates.
@@ -170,10 +171,11 @@ a performance baseline.
       build and load the runtime variant's supported platforms
        low-memory compose + bundled graph + Gremlin CRUD
                     standalone smoke test
-           push loaded x.y.z (or latest) indexes
+           push run-scoped candidate indexes
+             promote the complete tag set
                               |
                               v
-             update_latest_hash (latest mode only, optional)
+       update latest hash inside promotion (latest only, optional)
 ```
 
 Tag behavior:
@@ -231,7 +233,8 @@ Reusable workflows are the real implementation layer.
 - shared source SHA resolution and latest hash gate
 - build and locally load multi-platform candidates followed by strict low-memory integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
 - import of the Server image's bundled `example.groovy` graph and Gremlin CRUD validation
-- publication of the loaded platform index directly to the final tag
+- push of run-scoped candidate indexes, complete-set promotion to final tags,
+  and an in-promotion latest-hash update when applicable
 - independent release source ref and destination image tag inputs
 - standalone Server schema/CRUD, clean restart, persistence, and truncate test
   for `hugegraph/hugegraph`

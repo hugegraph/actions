@@ -172,7 +172,14 @@ jobs:
             ;;
         esac
 
-        if [ "$PUBLISH" = "true" ] && [ "$ENABLE_HASH_GATE" = "true" ]; then
+        if [ "$PUBLISH" = "true" ] \
+          && [ "$ENABLE_HASH_GATE" = "true" ] \
+          && [ "$MODE" = "latest" ] \
+          && [ "$DRY_RUN" != "true" ] \
+          && [ -z "$REQUESTED_IMAGE_TAG" ] \
+          && [ -n "$DEFAULT_SOURCE" ] \
+          && [ "$SOURCE_REPOSITORY" = "${DEFAULT_SOURCE%@*}" ] \
+          && [ "$SOURCE_REF" = "${DEFAULT_SOURCE#*@}" ]; then
           if [ "$HASH_REPO_OWNER" != "hugegraph" ] \
             || [ "$HASH_REPO_NAME" != "actions" ] \
             || [ "$LAST_HASH_NAME" != "LAST_SERVER_HASH" ]; then
@@ -348,6 +355,9 @@ jobs:
     needs: prepare
     if: ${{ needs.prepare.outputs.need_update == 'true' }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: pd-store-server-${{ needs.prepare.outputs.version_tag }}
+      cancel-in-progress: false
     env:
       SOURCE_REPOSITORY: ${{ inputs.source_repository }}
       SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
@@ -1410,8 +1420,8 @@ jobs:
           local image="$1" attempt
           for attempt in 1 2 3; do
             if docker buildx imagetools inspect "$image" \
-                 --format '{{json .Manifest}}' 2>/dev/null |
-                 jq -er '.digest'; then
+                 --format '{{json .}}' 2>/dev/null |
+                 jq -er '.manifest.digest'; then
               return 0
             fi
             sleep $((attempt * 3))
@@ -1448,13 +1458,24 @@ jobs:
             restored="false"
             for attempt in 1 2 3; do
               if [ "$expected" != "__ABSENT__" ]; then
-                if docker buildx imagetools create \
-                     --tag "$image" "${repository}@${expected}"; then
-                  actual="$(
-                    get_hub_tag_digest "$image" 2>/dev/null ||
-                      echo "__UNKNOWN__"
-                  )"
-                  [ "$actual" = "$expected" ] && restored="true"
+                actual="$(
+                  get_hub_tag_digest "$image" 2>/dev/null ||
+                    echo "__UNKNOWN__"
+                )"
+                if [ "$actual" = "$expected" ]; then
+                  restored="true"
+                elif [ "$actual" = "${candidate_ref[$image]##*@}" ]; then
+                  if docker buildx imagetools create \
+                       --tag "$image" "${repository}@${expected}"; then
+                    actual="$(
+                      get_hub_tag_digest "$image" 2>/dev/null ||
+                        echo "__UNKNOWN__"
+                    )"
+                    [ "$actual" = "$expected" ] && restored="true"
+                  fi
+                elif [ "$actual" != "__UNKNOWN__" ]; then
+                  echo "Refusing to overwrite newer tag ${image}" >&2
+                  break
                 fi
               else
                 actual="$(
@@ -1490,13 +1511,29 @@ jobs:
                 '{name:$name,value:$value}'
             )"
             for attempt in 1 2 3; do
-              if curl --fail-with-body -sS -L -X PATCH \
-                   -H "Accept: application/vnd.github+json" \
-                   -H "X-GitHub-Api-Version: 2022-11-28" \
-                   -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
-                   "https://api.github.com/repos/$HASH_REPO_OWNER/$HASH_REPO_NAME/actions/variables/$LAST_HASH_NAME" \
-                   --data-binary "$old_hash_payload"; then
+              current_hash="$(
+                curl --fail-with-body -sS -L \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
+                  "https://api.github.com/repos/$HASH_REPO_OWNER/$HASH_REPO_NAME/actions/variables/$LAST_HASH_NAME" |
+                  jq -er '.value'
+              )" || current_hash="__UNKNOWN__"
+              if [ "$current_hash" = "$LAST_HASH_VALUE" ]; then
                 hash_restored="true"
+                break
+              elif [ "$current_hash" = "$SOURCE_SHA" ]; then
+                if curl --fail-with-body -sS -L -X PATCH \
+                     -H "Accept: application/vnd.github+json" \
+                     -H "X-GitHub-Api-Version: 2022-11-28" \
+                     -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
+                     "https://api.github.com/repos/$HASH_REPO_OWNER/$HASH_REPO_NAME/actions/variables/$LAST_HASH_NAME" \
+                     --data-binary "$old_hash_payload"; then
+                  hash_restored="true"
+                  break
+                fi
+              elif [ "$current_hash" != "__UNKNOWN__" ]; then
+                echo "Refusing to overwrite a newer latest hash" >&2
                 break
               fi
               sleep $((attempt * 3))
