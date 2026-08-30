@@ -17,6 +17,14 @@ on:
         required: false
         default: ''
         description: 'Docker image tag'
+      runtime_variant:
+        type: choice
+        options:
+          - standard
+          - topling
+        required: false
+        default: standard
+        description: 'RocksDB runtime variant for local storage owners'
       publish:
         type: boolean
         required: false
@@ -45,12 +53,13 @@ jobs:
       source_ref: ${{ inputs.source_ref || 'master' }}
       default_source: apache/hugegraph@master
       image_tag: ${{ inputs.image_tag || '' }}
+      runtime_variant: ${{ inputs.runtime_variant || 'standard' }}
       publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
       mvn_args: ${{ github.event.inputs.mvn_args || '' }}
       strict_mode: true
       dry_run: false
       wait_timeout_sec: ${{ github.event.inputs.wait_timeout_sec || '300' }}
-      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph') == 'apache/hugegraph' && (inputs.source_ref || 'master') == 'master' && (inputs.image_tag || '') == '') }}
+      enable_hash_gate: ${{ (inputs.runtime_variant || 'standard') == 'standard' && (github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph') == 'apache/hugegraph' && (inputs.source_ref || 'master') == 'master' && (inputs.image_tag || '') == '')) }}
       last_hash_value: ${{ vars.LAST_SERVER_HASH }}
       last_hash_name: LAST_SERVER_HASH
       hash_repo_owner: hugegraph
