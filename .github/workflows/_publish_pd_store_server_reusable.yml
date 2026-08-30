@@ -205,16 +205,6 @@ jobs:
             echo "Latest hash input is stale; refusing to publish"
             exit 1
           fi
-          hash_probe_payload="$(
-            jq -cn --arg name "$LAST_HASH_NAME" --arg value "$current_hash" \
-              '{name:$name,value:$value}'
-          )"
-          curl --fail-with-body -sS -L -X PATCH \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
-            "https://api.github.com/repos/$HASH_REPO_OWNER/$HASH_REPO_NAME/actions/variables/$LAST_HASH_NAME" \
-            --data-binary "$hash_probe_payload"
         fi
 
         if ! [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -473,7 +463,13 @@ jobs:
             .dockerfile == $dockerfile and
             .tags == [$tag] and
             .platforms == $expected_platforms and
-            ((.target // "") == $target) and
+            (
+              if $target == "standard" then
+                ((.target // "") == "" or .target == "standard")
+              else
+                ((.target // "") == $target)
+              end
+            ) and
             .output == [{type: "docker"}] and
             .["cache-from"] == [
               registry_cache("hugegraph/hugegraph:shared-" + $cache_channel),
@@ -1375,13 +1371,18 @@ jobs:
             --arg password "$DOCKERHUB_PASSWORD" \
             '{username:$username,password:$password}'
         )"
-        hub_token="$(
-          curl --fail-with-body -sS -L \
-            -H 'Content-Type: application/json' \
-            --data-binary "$login_payload" \
-            https://hub.docker.com/v2/users/login |
-            jq -er '.token // .access_token'
-        )"
+        refresh_hub_token() {
+          local refreshed_token
+          refreshed_token="$(
+            curl --fail-with-body -sS -L \
+              -H 'Content-Type: application/json' \
+              --data-binary "$login_payload" \
+              https://hub.docker.com/v2/users/login |
+              jq -er '.token // .access_token'
+          )" || return 1
+          hub_token="$refreshed_token"
+        }
+        refresh_hub_token
 
         get_hub_tag_digest() {
           local image="$1" repository tag response_file http_code attempt digest
@@ -1451,6 +1452,11 @@ jobs:
           local image repository expected actual restored attempt
           local hash_restored old_hash_payload
           local failed="false"
+
+          if ! refresh_hub_token; then
+            echo "Failed to refresh Docker Hub token for rollback" >&2
+            return 1
+          fi
 
           for image in "${images[@]}"; do
             repository="${image%:*}"
