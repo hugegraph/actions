@@ -10,8 +10,8 @@ Its main purpose is to publish Docker images, validate releases, and host small 
 - `latest` publishing is the automated path: scheduled or manually triggered, with hash gating to skip unchanged sources.
 - `release` publishing is the manual path: it publishes from a versioned branch and should run even if the source is unchanged.
 - Most image publishers share [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).
-- `pd/store/server` uses [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml) with strict precheck and staged amd64/arm64 -> manifest flow.
-- In the pd/store/server path, temporary `*-amd64` and `*-arm64` tags are cleaned only after a successful manifest publish.
+- `pd/store/server` uses [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml) with a strict precheck and single-job multi-platform publication flow.
+- Compatible source revisions provide `docker/bake.hcl` so one native Maven stage feeds all four runtime images; older revisions use the serial compatibility path.
 
 ## Editing Rules
 
@@ -20,8 +20,8 @@ Its main purpose is to publish Docker images, validate releases, and host small 
 - Do not merge `latest` and `release` wrappers unless the trigger semantics are truly identical.
 - Keep special-case workflows separate when they need extra prechecks, custom ordering, or non-standard release flow.
 - For pd/store/server changes, preserve this intent:
-  - arm64 failure should not erase already published amd64 artifacts
-  - only full dual-arch success should trigger manifest + temporary tag cleanup
+  - build and test the exact locally loaded amd64/arm64 final tags
+  - only full dual-arch build and functional-test success should publish images
 
 ## Important Files
 

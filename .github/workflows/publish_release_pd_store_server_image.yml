@@ -18,7 +18,7 @@ on:
       mvn_args:
         required: false
         default: ''
-        description: 'mvn build args, like "MAVEN_ARGS=-P stage"'
+        description: 'Docker build args, one NAME=VALUE entry per line'
       strict_mode:
         type: boolean
         required: false

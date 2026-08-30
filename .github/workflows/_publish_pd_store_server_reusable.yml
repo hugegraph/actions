@@ -36,7 +36,7 @@ on:
         default: false
         type: boolean
       mvn_args:
-        description: "mvn build args"
+        description: "Docker build args, one NAME=VALUE entry per line"
         required: false
         default: ''
         type: string
@@ -254,7 +254,7 @@ jobs:
         {
           echo "## PD / Store / Server image build"
           echo
-          echo "- Cache backend: Docker Hub registry (BuildKit, mode=max)"
+          echo "- Cache backend: Docker Hub registry (BuildKit)"
           echo "- Cache channel: \`$CACHE_CHANNEL\`"
           echo "- Publish images: \`$PUBLISH_IMAGES\`"
           echo "- Dry run: \`$DRY_RUN\`"
@@ -263,9 +263,10 @@ jobs:
           else
             echo "- Cache policy: read-only validation (no registry exports)"
           fi
-          echo "- Build strategy: one x86 job loads amd64/arm64 images into the containerd image store"
+          echo "- Build strategy: shared Bake graph when supported, serial compatibility fallback otherwise"
           echo "- Test platform: locally loaded amd64 variants from the final multi-platform tags"
-          echo "- Shared per-module caches: \`buildcache-$CACHE_CHANNEL\`"
+          echo "- Shared build cache: \`hugegraph/hugegraph:shared-$CACHE_CHANNEL\`"
+          echo "- Compatibility caches: \`buildcache-$CACHE_CHANNEL\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
   build_test_publish_multiarch:
@@ -318,6 +319,138 @@ jobs:
       with:
         version: latest
 
+    - name: Validate source-provided Bake graph
+      if: ${{ hashFiles('docker/bake.hcl') != '' }}
+      env:
+        IMAGE_TAG: ${{ needs.prepare.outputs.version_tag }}
+        SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
+        EXPORT_CACHE: ${{ needs.prepare.outputs.publish_images }}
+      run: |
+        set -euo pipefail
+
+        bake_print_command=(
+          docker buildx bake
+          --file docker/bake.hcl
+          --print
+        )
+        expected_build_args='{"MAVEN_ARGS":""}'
+        while IFS= read -r build_arg; do
+          if [ -z "$build_arg" ]; then
+            continue
+          fi
+          build_arg_name="${build_arg%%=*}"
+          if [ "$build_arg_name" = "$build_arg" ] \
+            || ! [[ "$build_arg_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "Invalid mvn_args entry; expected one NAME=VALUE build argument per line"
+            exit 1
+          fi
+          if [ "$build_arg_name" = "SOURCE_REVISION" ]; then
+            echo "mvn_args must not override reserved build argument SOURCE_REVISION"
+            exit 1
+          fi
+          bake_print_command+=(
+            --set "*.args.${build_arg_name}=${build_arg#*=}"
+          )
+          expected_build_args="$(
+            jq -cn \
+              --argjson current "$expected_build_args" \
+              --arg name "$build_arg_name" \
+              --arg value "${build_arg#*=}" \
+              'def bake_print_value:
+                gsub("\\$\\{"; "$${") | gsub("%\\{"; "%%{");
+              $current + {($name): ($value | bake_print_value)}'
+          )"
+        done <<< "$MVN_ARGS"
+
+        "${bake_print_command[@]}" > /tmp/hugegraph-bake.json
+        jq -e \
+          --arg source_revision "$SOURCE_REVISION" \
+          --arg image_tag "$VERSION_TAG" \
+          --arg cache_channel "$CACHE_CHANNEL" \
+          --argjson expected_build_args "$expected_build_args" \
+          --argjson export_cache "$EXPORT_CACHE" '
+          def registry_cache($ref): {ref: $ref, type: "registry"};
+          def runtime_target($dockerfile; $tag; $legacy_cache):
+            .context == "." and
+            .dockerfile == $dockerfile and
+            .tags == [$tag] and
+            .platforms == ["linux/amd64", "linux/arm64"] and
+            .output == [{type: "docker"}] and
+            .["cache-from"] == [
+              registry_cache("hugegraph/hugegraph:shared-" + $cache_channel),
+              registry_cache($legacy_cache + $cache_channel)
+            ] and
+            ((.["cache-to"] // []) == (if $export_cache then [
+              {
+                mode: "min",
+                ref: ($legacy_cache + $cache_channel),
+                type: "registry"
+              }
+            ] else [] end)) and
+            .args == ($expected_build_args + {
+              SOURCE_REVISION: $source_revision
+            }) and
+            ((keys - [
+              "args", "cache-from", "cache-to", "context", "dockerfile",
+              "output", "platforms", "tags"
+            ]) == []);
+
+          .group.default.targets == [
+            "build-cache", "pd", "server-hstore", "server-standalone", "store"
+          ] and
+          (.target | keys) == [
+            "build-cache", "pd", "server-hstore", "server-standalone", "store"
+          ] and
+          (.target["build-cache"] |
+            .context == "." and
+            .dockerfile == "hugegraph-pd/Dockerfile" and
+            .target == "build" and
+            .platforms == ["linux/amd64", "linux/arm64"] and
+            .output == [{type: "cacheonly"}] and
+            .["cache-from"] == [
+              registry_cache("hugegraph/hugegraph:shared-" + $cache_channel),
+              registry_cache("hugegraph/pd:buildcache-" + $cache_channel)
+            ] and
+            ((.["cache-to"] // []) == (if $export_cache then [
+              {
+                mode: "max",
+                ref: ("hugegraph/hugegraph:shared-" + $cache_channel),
+                type: "registry"
+              }
+            ] else [] end)) and
+            .args == ($expected_build_args + {
+              SOURCE_REVISION: $source_revision
+            }) and
+            ((keys - [
+              "args", "cache-from", "cache-to", "context", "dockerfile",
+              "output", "platforms", "target"
+            ]) == [])) and
+          (.target.pd |
+            runtime_target(
+              "hugegraph-pd/Dockerfile";
+              "hugegraph/pd:" + $image_tag;
+              "hugegraph/pd:buildcache-"
+            )) and
+          (.target.store |
+            runtime_target(
+              "hugegraph-store/Dockerfile";
+              "hugegraph/store:" + $image_tag;
+              "hugegraph/store:buildcache-"
+            )) and
+          (.target["server-hstore"] |
+            runtime_target(
+              "hugegraph-server/Dockerfile-hstore";
+              "hugegraph/server:" + $image_tag;
+              "hugegraph/server:buildcache-"
+            )) and
+          (.target["server-standalone"] |
+            runtime_target(
+              "hugegraph-server/Dockerfile";
+              "hugegraph/hugegraph:" + $image_tag;
+              "hugegraph/hugegraph:buildcache-"
+            ))
+        ' /tmp/hugegraph-bake.json
+
     - name: Login to Docker Hub
       if: ${{ needs.prepare.outputs.publish_images == 'true' }}
       uses: docker/login-action@v4
@@ -331,8 +464,28 @@ jobs:
         docker builder prune -af || true
 
     - name: Build multi-platform candidates with retries
+      id: build
       run: |
         set -euo pipefail
+
+        build_started_at="$(date +%s)"
+        build_args=()
+        while IFS= read -r build_arg; do
+          if [ -z "$build_arg" ]; then
+            continue
+          fi
+          build_arg_name="${build_arg%%=*}"
+          if [ "$build_arg_name" = "$build_arg" ] \
+            || ! [[ "$build_arg_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "Invalid mvn_args entry; expected one NAME=VALUE build argument per line"
+            exit 1
+          fi
+          if [ "$build_arg_name" = "SOURCE_REVISION" ]; then
+            echo "mvn_args must not override reserved build argument SOURCE_REVISION"
+            exit 1
+          fi
+          build_args+=("$build_arg")
+        done <<< "$MVN_ARGS"
 
         build_candidate() {
           local module="$1" image="$2" dockerfile="$3" cache_repo="$4"
@@ -349,17 +502,16 @@ jobs:
               --tag "$image"
               --cache-from "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL}"
               --load
+              --build-arg "SOURCE_REVISION=${SOURCE_SHA}"
             )
             if [ "$PUBLISH_IMAGES" = "true" ]; then
               build_command+=(
                 --cache-to "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL},mode=max"
               )
             fi
-            while IFS= read -r build_arg; do
-              if [ -n "$build_arg" ]; then
-                build_command+=(--build-arg "$build_arg")
-              fi
-            done <<< "$MVN_ARGS"
+            for build_arg in "${build_args[@]}"; do
+              build_command+=(--build-arg "$build_arg")
+            done
             build_command+=(.)
 
             if "${build_command[@]}"; then
@@ -379,10 +531,67 @@ jobs:
           fi
         }
 
-        build_candidate pd "$PD_IMAGE" ./hugegraph-pd/Dockerfile hugegraph/pd
-        build_candidate store "$STORE_IMAGE" ./hugegraph-store/Dockerfile hugegraph/store
-        build_candidate server-hstore "$HSTORE_IMAGE" ./hugegraph-server/Dockerfile-hstore hugegraph/server
-        build_candidate server-standalone "$STANDALONE_IMAGE" ./hugegraph-server/Dockerfile hugegraph/hugegraph
+        if [ -f docker/bake.hcl ]; then
+          echo "Using source-provided shared Buildx Bake graph"
+          bake_command=(
+            docker buildx bake
+            --file docker/bake.hcl
+            --progress=plain
+          )
+          for build_arg in "${build_args[@]}"; do
+            build_arg_name="${build_arg%%=*}"
+            bake_command+=(
+              --set "*.args.${build_arg_name}=${build_arg#*=}"
+            )
+          done
+
+          built="false"
+          for attempt in 1 2 3; do
+            echo "Building all candidates with Bake (attempt ${attempt}/3) at $(date -u +%FT%TZ)"
+            if "${bake_command[@]}"; then
+              built="true"
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Bake failed; retrying with completed BuildKit layers"
+              sleep $((attempt * 5))
+            fi
+          done
+          if [ "$built" != "true" ]; then
+            echo "Failed to build candidates with Bake after 3 attempts"
+            exit 1
+          fi
+        else
+          echo "docker/bake.hcl is unavailable; using serial compatibility build"
+          build_candidate pd "$PD_IMAGE" ./hugegraph-pd/Dockerfile hugegraph/pd
+          build_candidate store "$STORE_IMAGE" ./hugegraph-store/Dockerfile hugegraph/store
+          build_candidate server-hstore "$HSTORE_IMAGE" ./hugegraph-server/Dockerfile-hstore hugegraph/server
+          build_candidate server-standalone "$STANDALONE_IMAGE" ./hugegraph-server/Dockerfile hugegraph/hugegraph
+        fi
+
+        build_duration_seconds="$(( $(date +%s) - build_started_at ))"
+        echo "build_duration_seconds=$build_duration_seconds" >> "$GITHUB_OUTPUT"
+        echo "Built all multi-platform candidates in ${build_duration_seconds}s"
+      env:
+        IMAGE_TAG: ${{ needs.prepare.outputs.version_tag }}
+        SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
+        EXPORT_CACHE: ${{ needs.prepare.outputs.publish_images }}
+
+    - name: Summarize candidate build timing
+      env:
+        BUILD_DURATION_SECONDS: ${{ steps.build.outputs.build_duration_seconds }}
+      run: |
+        {
+          echo
+          echo "## Candidate build timing"
+          echo
+          echo "- Duration: \`${BUILD_DURATION_SECONDS}s\`"
+          if [ -f docker/bake.hcl ]; then
+            echo "- Strategy: shared Buildx Bake graph"
+          else
+            echo "- Strategy: serial compatibility fallback"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Verify locally loaded platform variants
       run: |
