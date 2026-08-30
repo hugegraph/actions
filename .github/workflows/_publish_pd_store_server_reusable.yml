@@ -320,7 +320,7 @@ jobs:
         version: latest
 
     - name: Validate source-provided Bake graph
-      if: ${{ hashFiles('docker-bake.hcl') != '' }}
+      if: ${{ hashFiles('docker/bake.hcl') != '' }}
       env:
         IMAGE_TAG: ${{ needs.prepare.outputs.version_tag }}
         SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
@@ -330,7 +330,7 @@ jobs:
 
         bake_print_command=(
           docker buildx bake
-          --file docker-bake.hcl
+          --file docker/bake.hcl
           --print
         )
         expected_build_args='{"MAVEN_ARGS":""}'
@@ -531,11 +531,11 @@ jobs:
           fi
         }
 
-        if [ -f docker-bake.hcl ]; then
+        if [ -f docker/bake.hcl ]; then
           echo "Using source-provided shared Buildx Bake graph"
           bake_command=(
             docker buildx bake
-            --file docker-bake.hcl
+            --file docker/bake.hcl
             --progress=plain
           )
           for build_arg in "${build_args[@]}"; do
@@ -562,7 +562,7 @@ jobs:
             exit 1
           fi
         else
-          echo "docker-bake.hcl is unavailable; using serial compatibility build"
+          echo "docker/bake.hcl is unavailable; using serial compatibility build"
           build_candidate pd "$PD_IMAGE" ./hugegraph-pd/Dockerfile hugegraph/pd
           build_candidate store "$STORE_IMAGE" ./hugegraph-store/Dockerfile hugegraph/store
           build_candidate server-hstore "$HSTORE_IMAGE" ./hugegraph-server/Dockerfile-hstore hugegraph/server
@@ -586,7 +586,7 @@ jobs:
           echo "## Candidate build timing"
           echo
           echo "- Duration: \`${BUILD_DURATION_SECONDS}s\`"
-          if [ -f docker-bake.hcl ]; then
+          if [ -f docker/bake.hcl ]; then
             echo "- Strategy: shared Buildx Bake graph"
           else
             echo "- Strategy: serial compatibility fallback"
