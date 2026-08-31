@@ -907,7 +907,7 @@ jobs:
                 -Dpartition.default-shard-count=1
                 -Dpartition.store-max-shard-count=12
             volumes: !override
-              - hg-pd-data:${pd_data_path}
+              - pd-data:${pd_data_path}
           store:
             image: ${STORE_IMAGE}
             container_name: hg-store
@@ -952,7 +952,7 @@ jobs:
                 -Draft.maxEntriesSize=64
                 -Draft.maxBodySize=262144
             volumes: !override
-              - hg-store-data:${store_data_path}
+              - store-data:${store_data_path}
           server:
             image: ${HSTORE_IMAGE}
             container_name: hg-server
