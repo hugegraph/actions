@@ -344,7 +344,7 @@ jobs:
   build_test_publish_multiarch:
     needs: prepare
     if: ${{ needs.prepare.outputs.need_update == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runtime_variant == 'topling' && 'ubuntu-26.04' || 'ubuntu-latest' }}
     concurrency:
       group: pd-store-server-${{ needs.prepare.outputs.version_tag }}
       cancel-in-progress: false
