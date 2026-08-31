@@ -1229,6 +1229,48 @@ jobs:
           return 1
         }
 
+        stop_standalone() {
+          local stop_pid java_pid
+
+          docker stop -t 120 hg-ci-standalone >/dev/null &
+          stop_pid=$!
+          for _ in $(seq 1 15); do
+            if ! docker inspect --format '{{.State.Running}}' \
+              hg-ci-standalone | grep -qx true; then
+              break
+            fi
+            sleep 1
+          done
+          if docker inspect --format '{{.State.Running}}' \
+            hg-ci-standalone | grep -qx true; then
+            echo "Standalone shutdown is still pending after 15 seconds"
+            docker top hg-ci-standalone \
+              -eo pid,ppid,pgid,sid,stat,comm,args || true
+            docker exec hg-ci-standalone sh -c '
+              sha256sum /hugegraph-server/docker-entrypoint.sh
+              for status in /proc/[0-9]*/status; do
+                grep -Eq "^(Name|Pid|PPid|State|SigPnd|ShdPnd|SigBlk|SigIgn|SigCgt):" \
+                  "$status" && {
+                    printf "%s\n" "$status"
+                    grep -E "^(Name|Pid|PPid|State|SigPnd|ShdPnd|SigBlk|SigIgn|SigCgt):" \
+                      "$status"
+                  }
+              done
+            ' || true
+            java_pid="$(
+              docker exec hg-ci-standalone \
+                pgrep -f 'org.apache.hugegraph.bootstrap.HugeGraphServerBootstrap' \
+                | head -n 1 || true
+            )"
+            if [ -n "$java_pid" ]; then
+              docker exec hg-ci-standalone kill -QUIT "$java_pid" || true
+              sleep 2
+            fi
+            docker logs --tail 300 hg-ci-standalone || true
+          fi
+          wait "$stop_pid"
+        }
+
         if [ "$RUNTIME_VARIANT" = "topling" ]; then
           data_target="/hugegraph-server/topling-data"
         else
@@ -1273,7 +1315,7 @@ jobs:
           .result.data[0].edges == 1
         ' /tmp/hg-ci-standalone-create.json >/dev/null
 
-        docker stop -t 120 hg-ci-standalone >/dev/null
+        stop_standalone
         test "$(docker inspect --format '{{.State.ExitCode}}' \
                 hg-ci-standalone)" = "0"
         docker rm hg-ci-standalone >/dev/null
@@ -1336,7 +1378,7 @@ jobs:
           .result.data[0].edges == 0
         ' /tmp/hg-ci-standalone-after-truncate.json >/dev/null
 
-        docker stop -t 120 hg-ci-standalone >/dev/null
+        stop_standalone
         test "$(docker inspect --format '{{.State.ExitCode}}' \
                 hg-ci-standalone)" = "0"
         docker rm hg-ci-standalone >/dev/null
