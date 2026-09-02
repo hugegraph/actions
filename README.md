@@ -205,6 +205,7 @@ Reusable workflows are the real implementation layer.
 - selecting per-module build settings from `build_matrix_json`
 - enabling QEMU and Buildx when needed
 - running optional smoke tests
+- stamping `org.opencontainers.image.revision` and `org.opencontainers.image.source` with the resolved source commit and repository
 - pushing the final image
 - updating the latest-hash variable for `latest` mode only
 
