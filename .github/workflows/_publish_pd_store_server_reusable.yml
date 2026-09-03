@@ -610,10 +610,20 @@ jobs:
         echo "HUGEGRAPH_ADMIN_PASSWORD=$HUGEGRAPH_ADMIN_PASSWORD" >> "$GITHUB_ENV"
         export HUGEGRAPH_ADMIN_PASSWORD
 
-        if [ -f "docker/docker-compose.dev.yml" ]; then
+        if [ -f "docker/docker-compose-hstore.yml" ] \
+          && [ -f "docker/docker-compose.dev.yml" ]; then
+          # The current HugeGraph dev file is a thin HStore override. Keep the
+          # base topology in the command so its networks and named volumes are
+          # defined before the override is applied.
+          compose_file="docker/docker-compose-hstore.yml"
+          compose_dev_file="docker/docker-compose.dev.yml"
+        elif [ -f "docker/docker-compose.dev.yml" ]; then
+          # Older source revisions may still ship a self-contained dev file.
           compose_file="docker/docker-compose.dev.yml"
+          compose_dev_file=""
         elif [ -f "docker/docker-compose.yml" ]; then
           compose_file="docker/docker-compose.yml"
+          compose_dev_file=""
           echo "WARN: docker/docker-compose.dev.yml is unavailable; using legacy docker/docker-compose.yml"
         else
           echo "ERROR: no supported compose file found in $SOURCE_REPOSITORY@$SOURCE_SHA"
@@ -621,6 +631,7 @@ jobs:
           exit 1
         fi
         echo "COMPOSE_FILE=$compose_file" >> "$GITHUB_ENV"
+        echo "COMPOSE_DEV_FILE=$compose_dev_file" >> "$GITHUB_ENV"
 
         cat > /tmp/hg-ci-patch-server-config.sh <<'PATCH_SERVER'
         #!/usr/bin/env bash
@@ -749,13 +760,18 @@ jobs:
                 read_only: true
         COMPOSE_OVERRIDE
 
+        compose_args=(-f "$compose_file")
+        if [ -n "$compose_dev_file" ]; then
+          compose_args+=(-f "$compose_dev_file")
+        fi
         docker compose \
           -p hg-ci-precheck \
-          -f "$compose_file" \
+          "${compose_args[@]}" \
           -f /tmp/docker-compose.ci.override.yml \
           up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
 
-        docker compose -p hg-ci-precheck -f "$compose_file" -f /tmp/docker-compose.ci.override.yml ps
+        docker compose -p hg-ci-precheck "${compose_args[@]}" \
+          -f /tmp/docker-compose.ci.override.yml ps
 
     - name: Verify CI resource limits
       if: ${{ inputs.strict_mode }}
@@ -882,8 +898,14 @@ jobs:
       if: ${{ failure() && inputs.strict_mode }}
       run: |
         if [ -n "${COMPOSE_FILE:-}" ] && [ -f /tmp/docker-compose.ci.override.yml ]; then
-          docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml ps || true
-          docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
+          compose_args=(-f "$COMPOSE_FILE")
+          if [ -n "${COMPOSE_DEV_FILE:-}" ]; then
+            compose_args+=(-f "$COMPOSE_DEV_FILE")
+          fi
+          docker compose -p hg-ci-precheck "${compose_args[@]}" \
+            -f /tmp/docker-compose.ci.override.yml ps || true
+          docker compose -p hg-ci-precheck "${compose_args[@]}" \
+            -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
         else
           echo "Compose stack was not started; COMPOSE_FILE or CI override is unavailable"
         fi
@@ -904,9 +926,13 @@ jobs:
         set -euo pipefail
 
         if [ -n "${COMPOSE_FILE:-}" ] && [ -f /tmp/docker-compose.ci.override.yml ]; then
+          compose_args=(-f "$COMPOSE_FILE")
+          if [ -n "${COMPOSE_DEV_FILE:-}" ]; then
+            compose_args+=(-f "$COMPOSE_DEV_FILE")
+          fi
           docker compose \
             -p hg-ci-precheck \
-            -f "$COMPOSE_FILE" \
+            "${compose_args[@]}" \
             -f /tmp/docker-compose.ci.override.yml \
             down -v --remove-orphans
         else
