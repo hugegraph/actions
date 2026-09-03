@@ -44,6 +44,7 @@ run_prepare() {
     SOURCE_REF="$source_ref" \
     DEFAULT_SOURCE="$default_source" \
     REQUESTED_IMAGE_TAG="$image_tag" \
+    RUNTIME_VARIANT=standard \
     PUBLISH="$publish" \
     ENABLE_HASH_GATE=false \
     LAST_HASH_VALUE='' \

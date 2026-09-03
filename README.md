@@ -88,8 +88,9 @@ reports rather than this design document.
 
 Latest wrappers use two execution policies:
 
-- default branch (`master`, or `main` for AI): publish images, export registry
-  caches, create manifests, and update the corresponding `LAST_*_HASH` variable.
+- default branch (`master`, or `main` for AI): publish images, create manifests,
+  and update the corresponding `LAST_*_HASH` variable. General image workflows
+  may export registry caches; the PD/Store/Server flow keeps them read-only.
 - non-default ref with `publish=false`: force validation checks, import existing
   caches read-only, build all configured platforms, and skip image pushes, cache
   exports, manifests, and hash updates.
@@ -97,6 +98,15 @@ Latest wrappers use two execution policies:
 Set `publish=true` with an explicit `image_tag` to publish a branch build, for
 example `source_repository=hugegraph/hugegraph`, `source_ref=helm-dev`, and
 `image_tag=helm-dev`.
+
+The specialized PD/Store/Server latest wrapper also accepts
+`runtime_variant=topling`. This selects source-provided Topling Docker targets
+for PD, Store, and standalone Server while keeping the HStore Server free of a
+local Topling runtime. The current Topling native library is Linux x86_64 only,
+so this variant publishes amd64 images. The default `standard` variant remains
+dual-platform. A Topling run requires an explicit Topling-specific image tag,
+such as `topling` or `pr179-topling`, and never updates the standard `latest`
+hash gate.
 
 This allows an upstream Dockerfile branch to be benchmarked before merge without
 changing public images or production cache state.
@@ -111,12 +121,17 @@ hash updates.
 `pd/store/server` is the most important publishing flow in this repository and uses a dedicated reusable workflow:
 [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml).
 
-One candidate job builds PD, Store, HStore Server, and standalone Server as
-amd64/arm64 images and loads both variants into Docker's containerd image store.
-Source revisions that provide `docker/bake.hcl` use one shared BuildKit graph:
+One candidate job builds PD, Store, HStore Server, and standalone Server.
+Standard candidates are amd64/arm64 images. The explicit Topling runtime
+variant is amd64 only.
+Topling-specific tags are reserved: Topling publication requires one, while a
+standard publication is rejected if it tries to use one. Source revisions that
+provide `docker/bake.hcl` use one shared BuildKit graph:
 the native Maven stage runs once, the four target-platform runtime images fan
-out in parallel, and one shared registry cache is exported. Older source
-revisions keep the serial per-Dockerfile compatibility path.
+out in parallel. Registry caches are read-only until a separately validated
+cache-promotion design exists. Missing or incompatible standard Bake graphs use
+the serial per-Dockerfile compatibility path; Topling requires an explicit
+compatible Topling target contract.
 It starts the upstream `docker/docker-compose.dev.yml` topology with
 `pull_policy: never`, and runs a functional graph check before any image is
 published. Compatible source revisions that have the same service contract but
@@ -127,7 +142,10 @@ six-edge sample graph, then performs separate Gremlin read, create, update, and
 delete requests. The final query must return to the original 6V/6E baseline.
 The same loaded standalone candidate then passes its smoke test. Docker selects
 the local amd64 variants for these checks. Only after all enabled checks succeed
-are the already loaded multi-platform final tags pushed; the publishing stage
+are all four images pushed to run-unique candidate tags. The workflow then
+promotes the complete deployment set to the requested tags. A failed promotion
+or latest-hash update restores each previous digest (or removes a first-time
+tag), so a partial four-image update is not left behind. The publishing stage
 does not rebuild images and does not create temporary architecture tags.
 
 The precheck override constrains the three JVMs and Store buffers for a small
@@ -150,18 +168,20 @@ a performance baseline.
          +--------------------+----------------------------+
          | pd | store | server-hstore | server-standalone |
          +--------------------+----------------------------+
-        build and load linux/amd64 + linux/arm64 variants
+      build and load the runtime variant's supported platforms
        low-memory compose + bundled graph + Gremlin CRUD
                     standalone smoke test
-           push loaded x.y.z (or latest) indexes
+           push run-scoped candidate indexes
+             promote the complete tag set
                               |
                               v
-             update_latest_hash (latest mode only, optional)
+       update latest hash inside promotion (latest only, optional)
 ```
 
 Tag behavior:
 
-- Final tags contain both `linux/amd64` and `linux/arm64` variants.
+- Standard tags contain `linux/amd64` and `linux/arm64`.
+- Topling tags contain `linux/amd64` until its native runtime supports ARM64.
 - No temporary `*-amd64` or `*-arm64` tags are created.
 - Failed builds or functional checks stop the job before any candidate is pushed.
 
@@ -214,9 +234,11 @@ Reusable workflows are the real implementation layer.
 - shared source SHA resolution and latest hash gate
 - build and locally load multi-platform candidates followed by strict low-memory integration precheck for pd/store/server (hstore backend, `hugegraph/server`)
 - import of the Server image's bundled `example.groovy` graph and Gremlin CRUD validation
-- publication of the loaded amd64/arm64 index directly to the final tag
+- push of run-scoped candidate indexes, complete-set promotion to final tags,
+  and an in-promotion latest-hash update when applicable
 - independent release source ref and destination image tag inputs
-- standalone server smoke test for `hugegraph/hugegraph`
+- standalone Server schema/CRUD, clean restart, persistence, and truncate test
+  for `hugegraph/hugegraph`
 
 The current precheck intentionally uses a 1 PD + 1 Store + 1 Server topology so
 it fits standard GitHub-hosted runners. A full 3 PD + 3 Store + 3 Server compose
@@ -225,10 +247,11 @@ gate remains a TODO for a larger runner or a reliable lower-resource simulation.
 Wrapper workflows provide the common source and publication contract:
 
 - `source_repository`: source repository in `owner/name` format
-- `allowed_source_repositories`: comma-separated trusted repositories accepted by the wrapper
+- `allowed_source_repositories`: deprecated compatibility input; the reusable
+  pd/store/server workflow enforces its own fixed source allowlist
 - `source_ref`: source branch, tag, or commit
 - `image_tag`: optional image tag; the configured default source uses `latest`, other latest refs derive a tag when omitted, and release mode derives or validates a version
-- `publish`: whether to push images and registry caches
+- `publish`: whether to push tested images
 
 Only the component's Apache and HugeGraph source repositories are accepted by
 the built-in wrappers. Manual runs always respect `publish`; scheduled runs

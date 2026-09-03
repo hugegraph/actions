@@ -13,8 +13,9 @@ on:
         default: apache/hugegraph
         type: string
       allowed_source_repositories:
-        description: "comma-separated trusted source repositories"
-        required: true
+        description: "deprecated; this workflow enforces its own source allowlist"
+        required: false
+        default: ''
         type: string
       source_ref:
         description: "source branch, tag, or commit"
@@ -30,8 +31,13 @@ on:
         required: false
         default: ''
         type: string
+      runtime_variant:
+        description: "local RocksDB runtime variant: standard or topling"
+        required: false
+        default: standard
+        type: string
       publish:
-        description: "publish images and registry caches"
+        description: "publish tested images"
         required: false
         default: false
         type: boolean
@@ -104,13 +110,17 @@ jobs:
       env:
         MODE: ${{ inputs.mode }}
         SOURCE_REPOSITORY: ${{ inputs.source_repository }}
-        ALLOWED_SOURCE_REPOSITORIES: ${{ inputs.allowed_source_repositories }}
         SOURCE_REF: ${{ inputs.source_ref }}
         DEFAULT_SOURCE: ${{ inputs.default_source }}
         REQUESTED_IMAGE_TAG: ${{ inputs.image_tag }}
+        RUNTIME_VARIANT: ${{ inputs.runtime_variant }}
         PUBLISH: ${{ inputs.publish }}
         ENABLE_HASH_GATE: ${{ inputs.enable_hash_gate }}
         LAST_HASH_VALUE: ${{ inputs.last_hash_value }}
+        LAST_HASH_NAME: ${{ inputs.last_hash_name }}
+        HASH_REPO_OWNER: ${{ inputs.hash_repo_owner }}
+        HASH_REPO_NAME: ${{ inputs.hash_repo_name }}
+        PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         DRY_RUN: ${{ inputs.dry_run }}
       run: |
         set -euo pipefail
@@ -119,22 +129,82 @@ jobs:
           echo "Invalid mode: $MODE. Expected latest or release."
           exit 1
         fi
+        if [ "$RUNTIME_VARIANT" != "standard" ] \
+          && [ "$RUNTIME_VARIANT" != "topling" ]; then
+          echo "Invalid runtime variant: $RUNTIME_VARIANT"
+          exit 1
+        fi
+        if [ "$RUNTIME_VARIANT" = "topling" ] && [ "$MODE" != "latest" ]; then
+          echo "Topling runtime images are only supported by latest mode"
+          exit 1
+        fi
+        if [ "$RUNTIME_VARIANT" = "topling" ]; then
+          case "$REQUESTED_IMAGE_TAG" in
+            topling | topling-* | *-topling) ;;
+            *)
+              echo "Topling publishes require an explicit Topling-specific image_tag"
+              exit 1
+              ;;
+          esac
+          if [ "$ENABLE_HASH_GATE" = "true" ]; then
+            echo "Topling publishes must not use the standard latest hash gate"
+            exit 1
+          fi
+        fi
+        if [ "$RUNTIME_VARIANT" = "standard" ]; then
+          case "$REQUESTED_IMAGE_TAG" in
+            topling | topling-* | *-topling)
+              echo "Standard publishes must not use a Topling-reserved image_tag"
+              exit 1
+              ;;
+          esac
+        fi
         if [ "$MODE" = "release" ] && [ "$DRY_RUN" = "true" ]; then
           echo "dry_run is only supported by latest mode"
           exit 1
         fi
 
-        source_repository_allowed="false"
-        IFS=',' read -ra allowed_repositories <<< "$ALLOWED_SOURCE_REPOSITORIES"
-        for allowed_repository in "${allowed_repositories[@]}"; do
-          if [ "$SOURCE_REPOSITORY" = "$allowed_repository" ]; then
-            source_repository_allowed="true"
-            break
+        case "$SOURCE_REPOSITORY" in
+          apache/hugegraph | hugegraph/hugegraph) ;;
+          *)
+            echo "Source repository is not allowed: $SOURCE_REPOSITORY"
+            exit 1
+            ;;
+        esac
+
+        if [ "$PUBLISH" = "true" ] \
+          && [ "$ENABLE_HASH_GATE" = "true" ] \
+          && [ "$MODE" = "latest" ] \
+          && [ "$DRY_RUN" != "true" ] \
+          && [ -z "$REQUESTED_IMAGE_TAG" ] \
+          && [ -n "$DEFAULT_SOURCE" ] \
+          && [ "$SOURCE_REPOSITORY" = "${DEFAULT_SOURCE%@*}" ] \
+          && [ "$SOURCE_REF" = "${DEFAULT_SOURCE#*@}" ]; then
+          if [ "$HASH_REPO_OWNER" != "hugegraph" ] \
+            || [ "$HASH_REPO_NAME" != "actions" ] \
+            || [ "$LAST_HASH_NAME" != "LAST_SERVER_HASH" ]; then
+            echo "Invalid latest hash target; expected hugegraph/actions:LAST_SERVER_HASH"
+            exit 1
           fi
-        done
-        if [ "$source_repository_allowed" != "true" ]; then
-          echo "Source repository is not allowed: $SOURCE_REPOSITORY"
-          exit 1
+          if [ -z "$PERSONAL_ACCESS_TOKEN" ]; then
+            echo "PERSONAL_ACCESS_TOKEN is required when enable_hash_gate=true"
+            exit 1
+          fi
+          curl --fail-with-body -sS -L \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
+            "https://api.github.com/repos/$HASH_REPO_OWNER/$HASH_REPO_NAME/actions/variables/$LAST_HASH_NAME" \
+            >/tmp/latest-hash-variable.json
+          current_hash="$(
+            jq -er --arg name "$LAST_HASH_NAME" \
+              'select(.name == $name) | .value | strings' \
+              /tmp/latest-hash-variable.json
+          )"
+          if [ "$current_hash" != "$LAST_HASH_VALUE" ]; then
+            echo "Latest hash input is stale; refusing to publish"
+            exit 1
+          fi
         fi
 
         if ! [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -258,11 +328,13 @@ jobs:
           echo "- Cache channel: \`$CACHE_CHANNEL\`"
           echo "- Publish images: \`$PUBLISH_IMAGES\`"
           echo "- Dry run: \`$DRY_RUN\`"
-          if [ "$PUBLISH_IMAGES" = "true" ]; then
-          echo "- Cache writer: tested multi-platform candidate job"
+          echo "- Runtime variant: \`${{ inputs.runtime_variant }}\`"
+          if [ "${{ inputs.runtime_variant }}" = "topling" ]; then
+            echo "- Platforms: \`linux/amd64\` (Topling native runtime)"
           else
-            echo "- Cache policy: read-only validation (no registry exports)"
+            echo "- Platforms: \`linux/amd64, linux/arm64\`"
           fi
+          echo "- Cache policy: read-only validation (no registry exports)"
           echo "- Build strategy: shared Bake graph when supported, serial compatibility fallback otherwise"
           echo "- Test platform: locally loaded amd64 variants from the final multi-platform tags"
           echo "- Shared build cache: \`hugegraph/hugegraph:shared-$CACHE_CHANNEL\`"
@@ -272,7 +344,10 @@ jobs:
   build_test_publish_multiarch:
     needs: prepare
     if: ${{ needs.prepare.outputs.need_update == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runtime_variant == 'topling' && 'ubuntu-26.04' || 'ubuntu-latest' }}
+    concurrency:
+      group: pd-store-server-${{ needs.prepare.outputs.version_tag }}
+      cancel-in-progress: false
     env:
       SOURCE_REPOSITORY: ${{ inputs.source_repository }}
       SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
@@ -281,6 +356,8 @@ jobs:
       VERSION_TAG: ${{ needs.prepare.outputs.version_tag }}
       CACHE_CHANNEL: ${{ needs.prepare.outputs.cache_channel }}
       PUBLISH_IMAGES: ${{ needs.prepare.outputs.publish_images }}
+      RUNTIME_VARIANT: ${{ inputs.runtime_variant }}
+      SOURCE_URL: https://github.com/${{ inputs.source_repository }}
       PD_IMAGE: hugegraph/pd:${{ needs.prepare.outputs.version_tag }}
       STORE_IMAGE: hugegraph/store:${{ needs.prepare.outputs.version_tag }}
       HSTORE_IMAGE: hugegraph/server:${{ needs.prepare.outputs.version_tag }}
@@ -319,12 +396,14 @@ jobs:
       with:
         version: latest
 
-    - name: Validate source-provided Bake graph
+    - name: Detect source-provided Bake graph compatibility
+      id: bake_contract
       if: ${{ hashFiles('docker/bake.hcl') != '' }}
+      continue-on-error: ${{ inputs.runtime_variant == 'standard' }}
       env:
         IMAGE_TAG: ${{ needs.prepare.outputs.version_tag }}
         SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
-        EXPORT_CACHE: ${{ needs.prepare.outputs.publish_images }}
+        EXPORT_CACHE: 'false'
       run: |
         set -euo pipefail
 
@@ -344,8 +423,9 @@ jobs:
             echo "Invalid mvn_args entry; expected one NAME=VALUE build argument per line"
             exit 1
           fi
-          if [ "$build_arg_name" = "SOURCE_REVISION" ]; then
-            echo "mvn_args must not override reserved build argument SOURCE_REVISION"
+          if [ "$build_arg_name" = "SOURCE_REVISION" ] \
+            || [ "$build_arg_name" = "SOURCE_REPOSITORY" ]; then
+            echo "mvn_args must not override reserved source build arguments"
             exit 1
           fi
           bake_print_command+=(
@@ -363,18 +443,33 @@ jobs:
         done <<< "$MVN_ARGS"
 
         "${bake_print_command[@]}" > /tmp/hugegraph-bake.json
+        if [ "$RUNTIME_VARIANT" = "topling" ]; then
+          expected_platforms='["linux/amd64"]'
+        else
+          expected_platforms='["linux/amd64","linux/arm64"]'
+        fi
         jq -e \
           --arg source_revision "$SOURCE_REVISION" \
+          --arg source_repository "$SOURCE_URL" \
           --arg image_tag "$VERSION_TAG" \
           --arg cache_channel "$CACHE_CHANNEL" \
+          --arg runtime_variant "$RUNTIME_VARIANT" \
+          --argjson expected_platforms "$expected_platforms" \
           --argjson expected_build_args "$expected_build_args" \
           --argjson export_cache "$EXPORT_CACHE" '
           def registry_cache($ref): {ref: $ref, type: "registry"};
-          def runtime_target($dockerfile; $tag; $legacy_cache):
+          def runtime_target($dockerfile; $tag; $legacy_cache; $target):
             .context == "." and
             .dockerfile == $dockerfile and
             .tags == [$tag] and
-            .platforms == ["linux/amd64", "linux/arm64"] and
+            .platforms == $expected_platforms and
+            (
+              if $target == "standard" then
+                ((.target // "") == "" or .target == "standard")
+              else
+                ((.target // "") == $target)
+              end
+            ) and
             .output == [{type: "docker"}] and
             .["cache-from"] == [
               registry_cache("hugegraph/hugegraph:shared-" + $cache_channel),
@@ -388,11 +483,12 @@ jobs:
               }
             ] else [] end)) and
             .args == ($expected_build_args + {
+              SOURCE_REPOSITORY: $source_repository,
               SOURCE_REVISION: $source_revision
             }) and
             ((keys - [
               "args", "cache-from", "cache-to", "context", "dockerfile",
-              "output", "platforms", "tags"
+              "output", "platforms", "tags", "target"
             ]) == []);
 
           .group.default.targets == [
@@ -405,7 +501,7 @@ jobs:
             .context == "." and
             .dockerfile == "hugegraph-pd/Dockerfile" and
             .target == "build" and
-            .platforms == ["linux/amd64", "linux/arm64"] and
+            .platforms == $expected_platforms and
             .output == [{type: "cacheonly"}] and
             .["cache-from"] == [
               registry_cache("hugegraph/hugegraph:shared-" + $cache_channel),
@@ -419,6 +515,7 @@ jobs:
               }
             ] else [] end)) and
             .args == ($expected_build_args + {
+              SOURCE_REPOSITORY: $source_repository,
               SOURCE_REVISION: $source_revision
             }) and
             ((keys - [
@@ -429,25 +526,29 @@ jobs:
             runtime_target(
               "hugegraph-pd/Dockerfile";
               "hugegraph/pd:" + $image_tag;
-              "hugegraph/pd:buildcache-"
+              "hugegraph/pd:buildcache-";
+              $runtime_variant
             )) and
           (.target.store |
             runtime_target(
               "hugegraph-store/Dockerfile";
               "hugegraph/store:" + $image_tag;
-              "hugegraph/store:buildcache-"
+              "hugegraph/store:buildcache-";
+              $runtime_variant
             )) and
           (.target["server-hstore"] |
             runtime_target(
               "hugegraph-server/Dockerfile-hstore";
               "hugegraph/server:" + $image_tag;
-              "hugegraph/server:buildcache-"
+              "hugegraph/server:buildcache-";
+              ""
             )) and
           (.target["server-standalone"] |
             runtime_target(
               "hugegraph-server/Dockerfile";
               "hugegraph/hugegraph:" + $image_tag;
-              "hugegraph/hugegraph:buildcache-"
+              "hugegraph/hugegraph:buildcache-";
+              $runtime_variant
             ))
         ' /tmp/hugegraph-bake.json
 
@@ -480,8 +581,9 @@ jobs:
             echo "Invalid mvn_args entry; expected one NAME=VALUE build argument per line"
             exit 1
           fi
-          if [ "$build_arg_name" = "SOURCE_REVISION" ]; then
-            echo "mvn_args must not override reserved build argument SOURCE_REVISION"
+          if [ "$build_arg_name" = "SOURCE_REVISION" ] \
+            || [ "$build_arg_name" = "SOURCE_REPOSITORY" ]; then
+            echo "mvn_args must not override reserved source build arguments"
             exit 1
           fi
           build_args+=("$build_arg")
@@ -489,25 +591,40 @@ jobs:
 
         build_candidate() {
           local module="$1" image="$2" dockerfile="$3" cache_repo="$4"
-          local attempt succeeded
+          local target="${5:-}"
+          local attempt succeeded platforms runtime_label
           local -a build_command
           succeeded="false"
+          if [ "$RUNTIME_VARIANT" = "topling" ]; then
+            platforms="linux/amd64"
+          else
+            platforms="linux/amd64,linux/arm64"
+          fi
+          if [ "$module" = "server-hstore" ]; then
+            runtime_label="hstore"
+          elif [ -n "$target" ]; then
+            runtime_label="$target"
+          else
+            runtime_label="standard"
+          fi
 
           for attempt in 1 2 3; do
             echo "Building ${module} (attempt ${attempt}/3) at $(date -u +%FT%TZ)"
             build_command=(
               docker buildx build
               --file "$dockerfile"
-              --platform "linux/amd64,linux/arm64"
+              --platform "$platforms"
               --tag "$image"
               --cache-from "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL}"
               --load
+              --label "org.opencontainers.image.source=${SOURCE_URL}"
+              --label "org.opencontainers.image.revision=${SOURCE_SHA}"
+              --label "org.apache.hugegraph.rocksdb-runtime=${runtime_label}"
+              --build-arg "SOURCE_REPOSITORY=${SOURCE_URL}"
               --build-arg "SOURCE_REVISION=${SOURCE_SHA}"
             )
-            if [ "$PUBLISH_IMAGES" = "true" ]; then
-              build_command+=(
-                --cache-to "type=registry,ref=${cache_repo}:buildcache-${CACHE_CHANNEL},mode=max"
-              )
+            if [ -n "$target" ]; then
+              build_command+=(--target "$target")
             fi
             for build_arg in "${build_args[@]}"; do
               build_command+=(--build-arg "$build_arg")
@@ -531,12 +648,19 @@ jobs:
           fi
         }
 
-        if [ -f docker/bake.hcl ]; then
+        if [ -f docker/bake.hcl ] \
+          && [ "${{ steps.bake_contract.outcome }}" = "success" ]; then
           echo "Using source-provided shared Buildx Bake graph"
           bake_command=(
             docker buildx bake
             --file docker/bake.hcl
             --progress=plain
+            --set "*.labels.org.opencontainers.image.source=${SOURCE_URL}"
+            --set "*.labels.org.opencontainers.image.revision=${SOURCE_SHA}"
+            --set "pd.labels.org.apache.hugegraph.rocksdb-runtime=${RUNTIME_VARIANT}"
+            --set "store.labels.org.apache.hugegraph.rocksdb-runtime=${RUNTIME_VARIANT}"
+            --set "server-standalone.labels.org.apache.hugegraph.rocksdb-runtime=${RUNTIME_VARIANT}"
+            --set "server-hstore.labels.org.apache.hugegraph.rocksdb-runtime=hstore"
           )
           for build_arg in "${build_args[@]}"; do
             build_arg_name="${build_arg%%=*}"
@@ -562,11 +686,15 @@ jobs:
             exit 1
           fi
         else
-          echo "docker/bake.hcl is unavailable; using serial compatibility build"
-          build_candidate pd "$PD_IMAGE" ./hugegraph-pd/Dockerfile hugegraph/pd
-          build_candidate store "$STORE_IMAGE" ./hugegraph-store/Dockerfile hugegraph/store
+          echo "Bake graph unavailable or incompatible; using serial compatibility build"
+          runtime_target=""
+          if [ "$RUNTIME_VARIANT" = "topling" ]; then
+            runtime_target="topling"
+          fi
+          build_candidate pd "$PD_IMAGE" ./hugegraph-pd/Dockerfile hugegraph/pd "$runtime_target"
+          build_candidate store "$STORE_IMAGE" ./hugegraph-store/Dockerfile hugegraph/store "$runtime_target"
           build_candidate server-hstore "$HSTORE_IMAGE" ./hugegraph-server/Dockerfile-hstore hugegraph/server
-          build_candidate server-standalone "$STANDALONE_IMAGE" ./hugegraph-server/Dockerfile hugegraph/hugegraph
+          build_candidate server-standalone "$STANDALONE_IMAGE" ./hugegraph-server/Dockerfile hugegraph/hugegraph "$runtime_target"
         fi
 
         build_duration_seconds="$(( $(date +%s) - build_started_at ))"
@@ -575,7 +703,7 @@ jobs:
       env:
         IMAGE_TAG: ${{ needs.prepare.outputs.version_tag }}
         SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
-        EXPORT_CACHE: ${{ needs.prepare.outputs.publish_images }}
+        EXPORT_CACHE: 'false'
 
     - name: Summarize candidate build timing
       env:
@@ -586,7 +714,8 @@ jobs:
           echo "## Candidate build timing"
           echo
           echo "- Duration: \`${BUILD_DURATION_SECONDS}s\`"
-          if [ -f docker/bake.hcl ]; then
+          if [ -f docker/bake.hcl ] \
+            && [ "${{ steps.bake_contract.outcome }}" = "success" ]; then
             echo "- Strategy: shared Buildx Bake graph"
           else
             echo "- Strategy: serial compatibility fallback"
@@ -598,9 +727,73 @@ jobs:
         set -euo pipefail
         for image in "$PD_IMAGE" "$STORE_IMAGE" "$HSTORE_IMAGE" "$STANDALONE_IMAGE"; do
           docker image inspect --platform linux/amd64 "$image" >/dev/null
-          docker image inspect --platform linux/arm64 "$image" >/dev/null
-          echo "Loaded amd64 and arm64 variants: ${image}"
+          if [ "$RUNTIME_VARIANT" = "standard" ]; then
+            docker image inspect --platform linux/arm64 "$image" >/dev/null
+            echo "Loaded amd64 and arm64 variants: ${image}"
+          else
+            echo "Loaded amd64 Topling deployment variant: ${image}"
+          fi
         done
+
+    - name: Verify runtime variant contract
+      run: |
+        set -euo pipefail
+
+        assert_provenance() {
+          local image="$1" expected_runtime="$2"
+          local source revision runtime
+          source="$(docker image inspect --platform linux/amd64 \
+            --format '{{index .Config.Labels "org.opencontainers.image.source"}}' \
+            "$image")"
+          revision="$(docker image inspect --platform linux/amd64 \
+            --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+            "$image")"
+          runtime="$(docker image inspect --platform linux/amd64 \
+            --format '{{index .Config.Labels "org.apache.hugegraph.rocksdb-runtime"}}' \
+            "$image")"
+          [ "$source" = "$SOURCE_URL" ]
+          [ "$revision" = "$SOURCE_SHA" ]
+          [ "$runtime" = "$expected_runtime" ]
+        }
+
+        assert_provenance "$PD_IMAGE" "$RUNTIME_VARIANT"
+        assert_provenance "$STORE_IMAGE" "$RUNTIME_VARIANT"
+        assert_provenance "$STANDALONE_IMAGE" "$RUNTIME_VARIANT"
+        assert_provenance "$HSTORE_IMAGE" hstore
+
+        assert_no_topling_payload() {
+          local image="$1"
+          docker run --rm --platform linux/amd64 --entrypoint bash "$image" -c '
+            set -euo pipefail
+            ! find lib -path "*/topling/rocksdbjni*.jar" -print -quit |
+              grep -q .
+            test ! -e library/librocksdbjni-linux64.so
+          '
+        }
+
+        if [ "$RUNTIME_VARIANT" = "topling" ]; then
+          for image in "$PD_IMAGE" "$STORE_IMAGE" "$STANDALONE_IMAGE"; do
+            docker run --rm --platform linux/amd64 --entrypoint bash "$image" -c '
+              set -euo pipefail
+              test -n "$(find lib/topling -maxdepth 1 \
+                         -name "rocksdbjni*.jar" -print -quit)"
+              test -r library/librocksdbjni-linux64.so
+              ldd library/librocksdbjni-linux64.so |
+                tee /tmp/topling-ldd.txt
+              ! grep -q "not found" /tmp/topling-ldd.txt
+              TOPLINGDB_ROCKSDB_PROVIDER=topling source bin/preload-topling.sh
+              test "$TOPLING_ACTIVE_NATIVE" = \
+                "$PWD/library/librocksdbjni-linux64.so"
+              /bin/true
+            '
+          done
+          assert_no_topling_payload "$HSTORE_IMAGE"
+        else
+          assert_no_topling_payload "$PD_IMAGE"
+          assert_no_topling_payload "$STORE_IMAGE"
+          assert_no_topling_payload "$STANDALONE_IMAGE"
+          assert_no_topling_payload "$HSTORE_IMAGE"
+        fi
 
     - name: Start compose stack with local images
       if: ${{ inputs.strict_mode }}
@@ -610,10 +803,20 @@ jobs:
         echo "HUGEGRAPH_ADMIN_PASSWORD=$HUGEGRAPH_ADMIN_PASSWORD" >> "$GITHUB_ENV"
         export HUGEGRAPH_ADMIN_PASSWORD
 
-        if [ -f "docker/docker-compose.dev.yml" ]; then
+        if [ -f "docker/docker-compose-hstore.yml" ] \
+          && [ -f "docker/docker-compose.dev.yml" ]; then
+          # The current HugeGraph dev file is a thin HStore override. Keep the
+          # base topology in the command so its networks and named volumes are
+          # defined before the override is applied.
+          compose_file="docker/docker-compose-hstore.yml"
+          compose_dev_file="docker/docker-compose.dev.yml"
+        elif [ -f "docker/docker-compose.dev.yml" ]; then
+          # Older source revisions may still ship a self-contained dev file.
           compose_file="docker/docker-compose.dev.yml"
+          compose_dev_file=""
         elif [ -f "docker/docker-compose.yml" ]; then
           compose_file="docker/docker-compose.yml"
+          compose_dev_file=""
           echo "WARN: docker/docker-compose.dev.yml is unavailable; using legacy docker/docker-compose.yml"
         else
           echo "ERROR: no supported compose file found in $SOURCE_REPOSITORY@$SOURCE_SHA"
@@ -621,6 +824,7 @@ jobs:
           exit 1
         fi
         echo "COMPOSE_FILE=$compose_file" >> "$GITHUB_ENV"
+        echo "COMPOSE_DEV_FILE=$compose_dev_file" >> "$GITHUB_ENV"
 
         cat > /tmp/hg-ci-patch-server-config.sh <<'PATCH_SERVER'
         #!/usr/bin/env bash
@@ -655,6 +859,22 @@ jobs:
         PATCH_SERVER
         chmod 755 /tmp/hg-ci-patch-server-config.sh
 
+        if [ "$RUNTIME_VARIANT" = "topling" ]; then
+          pd_provider="topling"
+          pd_data_path="/hugegraph-pd/topling-pd-data"
+          pd_enforce_marker="true"
+          store_provider="topling"
+          store_data_path="/hugegraph-store/topling-storage"
+          store_enforce_marker="true"
+        else
+          pd_provider="rocksdb"
+          pd_data_path="/hugegraph-pd/pd_data"
+          pd_enforce_marker="false"
+          store_provider="rocksdb"
+          store_data_path="/hugegraph-store/storage"
+          store_enforce_marker="false"
+        fi
+
         cat > /tmp/docker-compose.ci.override.yml <<COMPOSE_OVERRIDE
         services:
           pd:
@@ -664,6 +884,9 @@ jobs:
             mem_limit: 1024m
             cpus: 2.0
             environment:
+              HG_PD_ROCKSDB_PROVIDER: ${pd_provider}
+              HG_PD_DATA_PATH: ${pd_data_path}
+              HG_PD_ENFORCE_PROVIDER_MARKER: "${pd_enforce_marker}"
               JAVA_OPTS: >-
                 -Xms128m -Xmx128m
                 -XX:ActiveProcessorCount=2
@@ -683,6 +906,8 @@ jobs:
                 -Djob.uninterruptibleThreadPool.queue=128
                 -Dpartition.default-shard-count=1
                 -Dpartition.store-max-shard-count=12
+            volumes: !override
+              - pd-data:${pd_data_path}
           store:
             image: ${STORE_IMAGE}
             container_name: hg-store
@@ -690,6 +915,9 @@ jobs:
             mem_limit: 1024m
             cpus: 2.0
             environment:
+              HG_STORE_ROCKSDB_PROVIDER: ${store_provider}
+              HG_STORE_DATA_PATH: ${store_data_path}
+              HG_STORE_ENFORCE_PROVIDER_MARKER: "${store_enforce_marker}"
               JAVA_OPTS: >-
                 -Xms128m -Xmx128m
                 -XX:ActiveProcessorCount=2
@@ -723,6 +951,8 @@ jobs:
                 -Draft.maxReplicatorInflightMsgs=32
                 -Draft.maxEntriesSize=64
                 -Draft.maxBodySize=262144
+            volumes: !override
+              - store-data:${store_data_path}
           server:
             image: ${HSTORE_IMAGE}
             container_name: hg-server
@@ -749,13 +979,18 @@ jobs:
                 read_only: true
         COMPOSE_OVERRIDE
 
+        compose_args=(-f "$compose_file")
+        if [ -n "$compose_dev_file" ]; then
+          compose_args+=(-f "$compose_dev_file")
+        fi
         docker compose \
           -p hg-ci-precheck \
-          -f "$compose_file" \
+          "${compose_args[@]}" \
           -f /tmp/docker-compose.ci.override.yml \
           up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
 
-        docker compose -p hg-ci-precheck -f "$compose_file" -f /tmp/docker-compose.ci.override.yml ps
+        docker compose -p hg-ci-precheck "${compose_args[@]}" \
+          -f /tmp/docker-compose.ci.override.yml ps
 
     - name: Verify CI resource limits
       if: ${{ inputs.strict_mode }}
@@ -878,12 +1113,79 @@ jobs:
 
         docker stats --no-stream hg-pd hg-store hg-server
 
+    - name: Restart integration stack and verify persistence
+      if: ${{ inputs.strict_mode }}
+      run: |
+        set -euo pipefail
+
+        compose=(docker compose -p hg-ci-precheck -f "$COMPOSE_FILE")
+        if [ -n "${COMPOSE_DEV_FILE:-}" ]; then
+          compose+=(-f "$COMPOSE_DEV_FILE")
+        fi
+        compose+=(-f /tmp/docker-compose.ci.override.yml)
+        "${compose[@]}" stop -t 120 server store pd
+        "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC" pd
+        "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC" store
+        "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC" server
+
+        curl -fsS --connect-timeout 3 --max-time 8 \
+          http://127.0.0.1:8620/v1/health >/dev/null
+        curl -fsS --connect-timeout 3 --max-time 8 \
+          http://127.0.0.1:8520/v1/health >/dev/null
+        curl -fsS --connect-timeout 3 --max-time 8 \
+          http://127.0.0.1:8080/versions >/dev/null
+
+        payload="$(
+          jq -nc \
+            --arg gremlin \
+              '[[vertices:g.V().count().next(),edges:g.E().count().next()]]' \
+            '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",
+              aliases:{graph:"DEFAULT-hugegraph",g:"__g_DEFAULT-hugegraph"}}'
+        )"
+        persistence_verified=false
+        for attempt in 1 2 3 4 5; do
+          if curl --fail-with-body -sS \
+            --compressed \
+            --connect-timeout 3 \
+            --max-time 30 \
+            --user "admin:$HUGEGRAPH_ADMIN_PASSWORD" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$payload" \
+            http://127.0.0.1:8080/gremlin \
+            | tee /tmp/hg-ci-restart-persistence.json \
+            && jq -e '
+              .status.code == 200 and
+              .result.data[0].vertices == 6 and
+              .result.data[0].edges == 6
+            ' /tmp/hg-ci-restart-persistence.json >/dev/null; then
+            persistence_verified=true
+            break
+          fi
+          echo "Persistence query attempt ${attempt}/5 did not pass"
+          sleep $((attempt * 2))
+        done
+        test "$persistence_verified" = "true"
+
+        for container in hg-pd hg-store hg-server; do
+          if docker logs "$container" 2>&1 |
+            grep -E 'cfh_to_view|SIGABRT|core dumped'; then
+            echo "Native abort evidence found in ${container}" >&2
+            exit 1
+          fi
+        done
+
     - name: Dump compose logs on failure
       if: ${{ failure() && inputs.strict_mode }}
       run: |
         if [ -n "${COMPOSE_FILE:-}" ] && [ -f /tmp/docker-compose.ci.override.yml ]; then
-          docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml ps || true
-          docker compose -p hg-ci-precheck -f "$COMPOSE_FILE" -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
+          compose_args=(-f "$COMPOSE_FILE")
+          if [ -n "${COMPOSE_DEV_FILE:-}" ]; then
+            compose_args+=(-f "$COMPOSE_DEV_FILE")
+          fi
+          docker compose -p hg-ci-precheck "${compose_args[@]}" \
+            -f /tmp/docker-compose.ci.override.yml ps || true
+          docker compose -p hg-ci-precheck "${compose_args[@]}" \
+            -f /tmp/docker-compose.ci.override.yml logs --no-color --tail=200 || true
         else
           echo "Compose stack was not started; COMPOSE_FILE or CI override is unavailable"
         fi
@@ -904,9 +1206,13 @@ jobs:
         set -euo pipefail
 
         if [ -n "${COMPOSE_FILE:-}" ] && [ -f /tmp/docker-compose.ci.override.yml ]; then
+          compose_args=(-f "$COMPOSE_FILE")
+          if [ -n "${COMPOSE_DEV_FILE:-}" ]; then
+            compose_args+=(-f "$COMPOSE_DEV_FILE")
+          fi
           docker compose \
             -p hg-ci-precheck \
-            -f "$COMPOSE_FILE" \
+            "${compose_args[@]}" \
             -f /tmp/docker-compose.ci.override.yml \
             down -v --remove-orphans
         else
@@ -929,83 +1235,495 @@ jobs:
       if: ${{ success() }}
       run: |
         set -euo pipefail
-        docker run --pull=never -d --name=hg-ci-standalone -p 18080:8080 "$STANDALONE_IMAGE"
-        for attempt in $(seq 1 30); do
-          if curl -fsS --connect-timeout 3 --max-time 8 http://127.0.0.1:18080/versions >/dev/null; then
-            echo "Standalone candidate is ready after attempt ${attempt}"
-            exit 0
-          fi
-          if ! docker inspect --format '{{.State.Running}}' hg-ci-standalone | grep -qx true; then
-            docker logs hg-ci-standalone
-            exit 1
-          fi
-          sleep 2
-        done
-        docker logs hg-ci-standalone
-        exit 1
 
-    - name: Push tested multi-platform candidates
+        wait_standalone() {
+          for attempt in $(seq 1 60); do
+            if curl -fsS --connect-timeout 3 --max-time 8 \
+              http://127.0.0.1:18080/versions >/dev/null; then
+              echo "Standalone candidate is ready after attempt ${attempt}"
+              return 0
+            fi
+            if ! docker inspect --format '{{.State.Running}}' \
+              hg-ci-standalone | grep -qx true; then
+              docker logs hg-ci-standalone
+              return 1
+            fi
+            sleep 2
+          done
+          docker logs hg-ci-standalone
+          return 1
+        }
+
+        stop_standalone() {
+          local stop_pid java_pid
+
+          docker stop -t 120 hg-ci-standalone >/dev/null &
+          stop_pid=$!
+          for _ in $(seq 1 15); do
+            if ! docker inspect --format '{{.State.Running}}' \
+              hg-ci-standalone | grep -qx true; then
+              break
+            fi
+            sleep 1
+          done
+          if docker inspect --format '{{.State.Running}}' \
+            hg-ci-standalone | grep -qx true; then
+            echo "Standalone shutdown is still pending after 15 seconds"
+            docker top hg-ci-standalone \
+              -eo pid,ppid,pgid,sid,stat,comm,args || true
+            docker exec hg-ci-standalone sh -c '
+              sha256sum /hugegraph-server/docker-entrypoint.sh
+              for status in /proc/[0-9]*/status; do
+                grep -Eq "^(Name|Pid|PPid|State|SigPnd|ShdPnd|SigBlk|SigIgn|SigCgt):" \
+                  "$status" && {
+                    printf "%s\n" "$status"
+                    grep -E "^(Name|Pid|PPid|State|SigPnd|ShdPnd|SigBlk|SigIgn|SigCgt):" \
+                      "$status"
+                  }
+              done
+            ' || true
+            java_pid="$(
+              docker exec hg-ci-standalone \
+                pgrep -f 'org.apache.hugegraph.bootstrap.HugeGraphServerBootstrap' \
+                | head -n 1 || true
+            )"
+            if [ -n "$java_pid" ]; then
+              docker exec hg-ci-standalone kill -QUIT "$java_pid" || true
+              sleep 2
+            fi
+            docker logs --tail 300 hg-ci-standalone || true
+          fi
+          wait "$stop_pid"
+        }
+
+        if [ "$RUNTIME_VARIANT" = "topling" ]; then
+          data_target="/hugegraph-server/topling-data"
+        else
+          data_target="/hugegraph-server/rocksdb-data"
+        fi
+        docker volume create hg-ci-standalone-data >/dev/null
+        docker run --pull=never -d --name=hg-ci-standalone \
+          -p 18080:8080 \
+          -v "hg-ci-standalone-data:${data_target}" \
+          "$STANDALONE_IMAGE"
+        wait_standalone
+
+        create_payload="$(
+          jq -nc \
+            --arg gremlin '
+              schema = graph.schema();
+              schema.propertyKey("name").asText().ifNotExist().create();
+              schema.vertexLabel("person").properties("name")
+                    .primaryKeys("name").ifNotExist().create();
+              schema.edgeLabel("knows").sourceLabel("person")
+                    .targetLabel("person").ifNotExist().create();
+              alice = graph.addVertex(T.label, "person", "name", "alice");
+              bob = graph.addVertex(T.label, "person", "name", "bob");
+              alice.addEdge("knows", bob);
+              graph.tx().commit();
+              [[vertices:g.V().count().next(),edges:g.E().count().next()]]
+            ' \
+            '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",
+              aliases:{graph:"DEFAULT-hugegraph",g:"__g_DEFAULT-hugegraph"}}'
+        )"
+        curl --fail-with-body -sS \
+          --compressed \
+          --connect-timeout 3 \
+          --max-time 30 \
+          -H 'Content-Type: application/json' \
+          --data-binary "$create_payload" \
+          http://127.0.0.1:18080/gremlin \
+          | tee /tmp/hg-ci-standalone-create.json
+        jq -e '
+          .status.code == 200 and
+          .result.data[0].vertices == 2 and
+          .result.data[0].edges == 1
+        ' /tmp/hg-ci-standalone-create.json >/dev/null
+
+        stop_standalone
+        test "$(docker inspect --format '{{.State.ExitCode}}' \
+                hg-ci-standalone)" = "0"
+        docker rm hg-ci-standalone >/dev/null
+
+        docker run --pull=never -d --name=hg-ci-standalone \
+          -p 18080:8080 \
+          -v "hg-ci-standalone-data:${data_target}" \
+          "$STANDALONE_IMAGE"
+        wait_standalone
+
+        payload="$(
+          jq -nc \
+            --arg gremlin \
+              '[[vertices:g.V().count().next(),edges:g.E().count().next()]]' \
+            '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",
+              aliases:{graph:"DEFAULT-hugegraph",g:"__g_DEFAULT-hugegraph"}}'
+        )"
+        curl --fail-with-body -sS \
+          --compressed \
+          --connect-timeout 3 \
+          --max-time 30 \
+          -H 'Content-Type: application/json' \
+          --data-binary "$payload" \
+          http://127.0.0.1:18080/gremlin \
+          | tee /tmp/hg-ci-standalone-restart.json
+        jq -e '
+          .status.code == 200 and
+          .result.data[0].vertices == 2 and
+          .result.data[0].edges == 1
+        ' /tmp/hg-ci-standalone-restart.json >/dev/null
+
+        truncate_payload="$(
+          jq -nc \
+            --arg gremlin 'graph.truncateBackend(); true' \
+            '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",
+              aliases:{graph:"DEFAULT-hugegraph",g:"__g_DEFAULT-hugegraph"}}'
+        )"
+        curl --fail-with-body -sS \
+          --compressed \
+          --connect-timeout 3 \
+          --max-time 30 \
+          -H 'Content-Type: application/json' \
+          --data-binary "$truncate_payload" \
+          http://127.0.0.1:18080/gremlin \
+          | tee /tmp/hg-ci-standalone-truncate.json
+        jq -e '.status.code == 200' \
+          /tmp/hg-ci-standalone-truncate.json >/dev/null
+
+        curl --fail-with-body -sS \
+          --compressed \
+          --connect-timeout 3 \
+          --max-time 30 \
+          -H 'Content-Type: application/json' \
+          --data-binary "$payload" \
+          http://127.0.0.1:18080/gremlin \
+          | tee /tmp/hg-ci-standalone-after-truncate.json
+        jq -e '
+          .status.code == 200 and
+          .result.data[0].vertices == 0 and
+          .result.data[0].edges == 0
+        ' /tmp/hg-ci-standalone-after-truncate.json >/dev/null
+
+        stop_standalone
+        test "$(docker inspect --format '{{.State.ExitCode}}' \
+                hg-ci-standalone)" = "0"
+        docker rm hg-ci-standalone >/dev/null
+        docker volume rm hg-ci-standalone-data >/dev/null
+
+    - name: Publish tested deployment set
       if: ${{ success() && needs.prepare.outputs.publish_images == 'true' }}
+      env:
+        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+        HASH_GATE_APPLIED: ${{ needs.prepare.outputs.hash_gate_applied }}
+        HASH_REPO_OWNER: ${{ inputs.hash_repo_owner }}
+        HASH_REPO_NAME: ${{ inputs.hash_repo_name }}
+        LAST_HASH_VALUE: ${{ inputs.last_hash_value }}
+        LAST_HASH_NAME: ${{ inputs.last_hash_name }}
+        PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
       run: |
         set -euo pipefail
-        for image in "$PD_IMAGE" "$STORE_IMAGE" "$HSTORE_IMAGE" "$STANDALONE_IMAGE"; do
+
+        images=(
+          "$PD_IMAGE"
+          "$STORE_IMAGE"
+          "$HSTORE_IMAGE"
+          "$STANDALONE_IMAGE"
+        )
+        candidate_tag="candidate-${RUNTIME_VARIANT}-${SOURCE_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        declare -A candidate_ref old_digest
+
+        login_payload="$(
+          jq -cn \
+            --arg username "$DOCKERHUB_USERNAME" \
+            --arg password "$DOCKERHUB_PASSWORD" \
+            '{username:$username,password:$password}'
+        )"
+        refresh_hub_token() {
+          local refreshed_token
+          refreshed_token="$(
+            curl --fail-with-body -sS -L \
+              -H 'Content-Type: application/json' \
+              --data-binary "$login_payload" \
+              https://hub.docker.com/v2/users/login |
+              jq -er '.token // .access_token'
+          )" || return 1
+          hub_token="$refreshed_token"
+        }
+        refresh_hub_token
+
+        get_hub_tag_digest() {
+          local image="$1" repository tag response_file http_code attempt digest
+          repository="${image%:*}"
+          tag="${image##*:}"
+          response_file="$(mktemp)"
+          for attempt in 1 2 3; do
+            if http_code="$(
+              curl -sS -L -o "$response_file" -w '%{http_code}' \
+                -H "Authorization: Bearer $hub_token" \
+                "https://hub.docker.com/v2/repositories/${repository}/tags/${tag}/"
+            )"; then
+              case "$http_code" in
+                200)
+                  if digest="$(jq -er '.digest' "$response_file")"; then
+                    echo "$digest"
+                    rm -f "$response_file"
+                    return 0
+                  fi
+                  ;;
+                404)
+                  echo "__ABSENT__"
+                  rm -f "$response_file"
+                  return 0
+                  ;;
+              esac
+            fi
+            sleep $((attempt * 3))
+          done
+          echo "Could not determine Docker Hub tag state for ${image}" >&2
+          rm -f "$response_file"
+          return 1
+        }
+
+        inspect_digest() {
+          local image="$1" attempt
+          for attempt in 1 2 3; do
+            if docker buildx imagetools inspect "$image" \
+                 --format '{{json .}}' 2>/dev/null |
+                 jq -er '.manifest.digest'; then
+              return 0
+            fi
+            sleep $((attempt * 3))
+          done
+          return 1
+        }
+
+        delete_hub_tag() {
+          local image="$1" repository tag
+          repository="${image%:*}"
+          tag="${image##*:}"
+          curl --fail-with-body -sS -L -X DELETE \
+            -H "Authorization: Bearer $hub_token" \
+            "https://hub.docker.com/v2/repositories/${repository}/tags/${tag}/"
+        }
+
+        cleanup_candidates() {
+          local image repository candidate
+          for image in "${images[@]}"; do
+            repository="${image%:*}"
+            candidate="${repository}:${candidate_tag}"
+            delete_hub_tag "$candidate" >/dev/null 2>&1 || true
+          done
+        }
+
+        rollback_publication() {
+          local image repository expected actual restored attempt
+          local hash_restored old_hash_payload
+          local failed="false"
+
+          if ! refresh_hub_token; then
+            echo "Failed to refresh Docker Hub token for rollback" >&2
+            return 1
+          fi
+
+          for image in "${images[@]}"; do
+            repository="${image%:*}"
+            expected="${old_digest[$image]}"
+            restored="false"
+            for attempt in 1 2 3; do
+              if [ "$expected" != "__ABSENT__" ]; then
+                actual="$(
+                  get_hub_tag_digest "$image" 2>/dev/null ||
+                    echo "__UNKNOWN__"
+                )"
+                if [ "$actual" = "$expected" ]; then
+                  restored="true"
+                elif [ "$actual" = "${candidate_ref[$image]##*@}" ]; then
+                  if docker buildx imagetools create \
+                       --prefer-index=false \
+                       --tag "$image" "${repository}@${expected}"; then
+                    actual="$(
+                      get_hub_tag_digest "$image" 2>/dev/null ||
+                        echo "__UNKNOWN__"
+                    )"
+                    [ "$actual" = "$expected" ] && restored="true"
+                  fi
+                elif [ "$actual" != "__UNKNOWN__" ]; then
+                  echo "Refusing to overwrite newer tag ${image}" >&2
+                  break
+                fi
+              else
+                actual="$(
+                  get_hub_tag_digest "$image" 2>/dev/null ||
+                    echo "__UNKNOWN__"
+                )"
+                if [ "$actual" = "__ABSENT__" ]; then
+                  restored="true"
+                elif [ "$actual" = "${candidate_ref[$image]##*@}" ] \
+                  && delete_hub_tag "$image"; then
+                  actual="$(
+                    get_hub_tag_digest "$image" 2>/dev/null ||
+                      echo "__UNKNOWN__"
+                  )"
+                  [ "$actual" = "__ABSENT__" ] && restored="true"
+                fi
+              fi
+              [ "$restored" = "true" ] && break
+              sleep $((attempt * 3))
+            done
+            if [ "$restored" != "true" ]; then
+              echo "Failed to restore ${image}" >&2
+              failed="true"
+            fi
+          done
+
+          if [ "$hash_update_attempted" = "true" ]; then
+            hash_restored="false"
+            old_hash_payload="$(
+              jq -cn \
+                --arg name "$LAST_HASH_NAME" \
+                --arg value "$LAST_HASH_VALUE" \
+                '{name:$name,value:$value}'
+            )"
+            for attempt in 1 2 3; do
+              current_hash="$(
+                curl --fail-with-body -sS -L \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
+                  "https://api.github.com/repos/$HASH_REPO_OWNER/$HASH_REPO_NAME/actions/variables/$LAST_HASH_NAME" |
+                  jq -er '.value'
+              )" || current_hash="__UNKNOWN__"
+              if [ "$current_hash" = "$LAST_HASH_VALUE" ]; then
+                hash_restored="true"
+                break
+              elif [ "$current_hash" = "$SOURCE_SHA" ]; then
+                if curl --fail-with-body -sS -L -X PATCH \
+                     -H "Accept: application/vnd.github+json" \
+                     -H "X-GitHub-Api-Version: 2022-11-28" \
+                     -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
+                     "https://api.github.com/repos/$HASH_REPO_OWNER/$HASH_REPO_NAME/actions/variables/$LAST_HASH_NAME" \
+                     --data-binary "$old_hash_payload"; then
+                  hash_restored="true"
+                  break
+                fi
+              elif [ "$current_hash" != "__UNKNOWN__" ]; then
+                echo "Refusing to overwrite a newer latest hash" >&2
+                break
+              fi
+              sleep $((attempt * 3))
+            done
+            if [ "$hash_restored" != "true" ]; then
+              echo "Failed to restore latest hash variable" >&2
+              failed="true"
+            fi
+          fi
+          [ "$failed" = "false" ]
+        }
+
+        promotion_started="false"
+        publication_complete="false"
+        hash_update_attempted="false"
+        on_exit() {
+          local status="$?"
+          trap - EXIT
+          if [ "$status" -ne 0 ] \
+            && [ "$promotion_started" = "true" ] \
+            && [ "$publication_complete" != "true" ]; then
+            rollback_publication ||
+              echo "Deployment-set rollback was incomplete" >&2
+          fi
+          cleanup_candidates
+          exit "$status"
+        }
+        trap on_exit EXIT
+        trap 'exit 1' INT TERM
+
+        for image in "${images[@]}"; do
+          repository="${image%:*}"
+          candidate="${repository}:${candidate_tag}"
+          docker tag "$image" "$candidate"
           pushed="false"
           for attempt in 1 2 3; do
-            echo "Pushing tested multi-platform candidate ${image} (attempt ${attempt}/3)"
-            if docker push "$image"; then
+            echo "Pushing deployment candidate ${candidate} (attempt ${attempt}/3)"
+            if docker push "$candidate"; then
               pushed="true"
               break
             fi
             sleep $((attempt * 5))
           done
           if [ "$pushed" != "true" ]; then
-            echo "Failed to push ${image} after 3 attempts"
+            echo "Failed to push ${candidate} after 3 attempts"
             exit 1
+          fi
+          if ! digest="$(inspect_digest "$candidate")"; then
+            echo "Could not inspect deployment candidate ${candidate}" >&2
+            exit 1
+          fi
+          candidate_ref["$image"]="${repository}@${digest}"
+        done
+
+        for image in "${images[@]}"; do
+          if ! digest="$(get_hub_tag_digest "$image")"; then
+            exit 1
+          fi
+          old_digest["$image"]="$digest"
+        done
+
+        promotion_started="true"
+        publish_failed="false"
+        for image in "${images[@]}"; do
+          if ! docker buildx imagetools create \
+               --prefer-index=false \
+               --tag "$image" "${candidate_ref[$image]}"; then
+            echo "Failed to promote deployment candidate for ${image}" >&2
+            publish_failed="true"
+            break
+          fi
+          expected="${candidate_ref[$image]##*@}"
+          if ! actual="$(inspect_digest "$image")"; then
+            echo "Could not inspect promoted image ${image}" >&2
+            publish_failed="true"
+            break
+          fi
+          if [ "$actual" != "$expected" ]; then
+            echo "Promoted digest mismatch for ${image}" >&2
+            publish_failed="true"
+            break
           fi
         done
 
+        if [ "$publish_failed" = "false" ] \
+          && [ "$HASH_GATE_APPLIED" = "true" ]; then
+          hash_payload="$(
+            jq -cn --arg name "$LAST_HASH_NAME" --arg value "$SOURCE_SHA" \
+              '{name:$name,value:$value}'
+          )"
+          hash_update_attempted="true"
+          if ! curl --fail-with-body -sS -L -X PATCH \
+               -H "Accept: application/vnd.github+json" \
+               -H "X-GitHub-Api-Version: 2022-11-28" \
+               -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
+               "https://api.github.com/repos/$HASH_REPO_OWNER/$HASH_REPO_NAME/actions/variables/$LAST_HASH_NAME" \
+               --data-binary "$hash_payload"; then
+            echo "Failed to update latest hash after image promotion" >&2
+            publish_failed="true"
+          fi
+        fi
+
+        if [ "$publish_failed" = "true" ]; then
+          exit 1
+        fi
+
+        publication_complete="true"
+
     - name: Cleanup standalone container
       if: ${{ always() }}
-      run: docker rm -f hg-ci-standalone >/dev/null 2>&1 || true
+      run: |
+        docker rm -f hg-ci-standalone >/dev/null 2>&1 || true
+        docker volume rm hg-ci-standalone-data >/dev/null 2>&1 || true
 
     - name: Post-check cleanup
       if: ${{ always() }}
       run: |
         docker system prune -af || true
         docker builder prune -af || true
-
-  update_latest_hash:
-    needs: [prepare, build_test_publish_multiarch]
-    if: ${{ inputs.mode == 'latest' && needs.prepare.outputs.hash_gate_applied == 'true' && needs.prepare.outputs.need_update == 'true' && needs.prepare.outputs.publish_images == 'true' && needs.build_test_publish_multiarch.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-    - name: Validate hash update inputs
-      env:
-        LAST_HASH_NAME: ${{ inputs.last_hash_name }}
-        PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-      run: |
-        set -euo pipefail
-        if [ -z "$LAST_HASH_NAME" ]; then
-          echo "last_hash_name is required when enable_hash_gate=true"
-          exit 1
-        fi
-        if [ -z "$PERSONAL_ACCESS_TOKEN" ]; then
-          echo "PERSONAL_ACCESS_TOKEN is required to update latest hash"
-          exit 1
-        fi
-
-    - name: Update latest source hash variable
-      env:
-        OWNER: ${{ inputs.hash_repo_owner }}
-        REPO: ${{ inputs.hash_repo_name }}
-        LAST_HASH_NAME: ${{ inputs.last_hash_name }}
-        SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-        PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-      run: |
-        set -euo pipefail
-        curl --fail-with-body -sS -L -X PATCH \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          -H "Authorization: Bearer $PERSONAL_ACCESS_TOKEN" \
-          "https://api.github.com/repos/$OWNER/$REPO/actions/variables/$LAST_HASH_NAME" \
-          -d '{"name":"'"$LAST_HASH_NAME"'","value":"'"$SOURCE_SHA"'"}'
