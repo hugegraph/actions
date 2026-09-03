@@ -627,7 +627,8 @@ jobs:
           echo "WARN: docker/docker-compose.dev.yml is unavailable; using legacy docker/docker-compose.yml"
         else
           echo "ERROR: no supported compose file found in $SOURCE_REPOSITORY@$SOURCE_SHA"
-          echo "Expected docker/docker-compose.dev.yml or docker/docker-compose.yml."
+          echo "Expected docker/docker-compose-hstore.yml plus docker/docker-compose.dev.yml,"
+          echo "or a self-contained docker/docker-compose.dev.yml or docker/docker-compose.yml."
           exit 1
         fi
         echo "COMPOSE_FILE=$compose_file" >> "$GITHUB_ENV"
