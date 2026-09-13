@@ -610,6 +610,14 @@ jobs:
         echo "HUGEGRAPH_ADMIN_PASSWORD=$HUGEGRAPH_ADMIN_PASSWORD" >> "$GITHUB_ENV"
         export HUGEGRAPH_ADMIN_PASSWORD
 
+        # The HStore topology requires the PD REST secret during interpolation,
+        # so every later compose command (logs, down) needs it too. Older source
+        # revisions ignore it. Hex keeps it printable ASCII, as Hubble requires.
+        HG_PD_AUTH_SECRET_KEY="$(openssl rand -hex 24)"
+        echo "::add-mask::$HG_PD_AUTH_SECRET_KEY"
+        echo "HG_PD_AUTH_SECRET_KEY=$HG_PD_AUTH_SECRET_KEY" >> "$GITHUB_ENV"
+        export HG_PD_AUTH_SECRET_KEY
+
         if [ -f "docker/docker-compose-hstore.yml" ] \
           && [ -f "docker/docker-compose.dev.yml" ]; then
           # The current HugeGraph dev file is a thin HStore override. Keep the
@@ -633,6 +641,14 @@ jobs:
         fi
         echo "COMPOSE_FILE=$compose_file" >> "$GITHUB_ENV"
         echo "COMPOSE_DEV_FILE=$compose_dev_file" >> "$GITHUB_ENV"
+
+        # Hubble in the HStore topology mounts a gitignored properties file that
+        # carries the PD secret, with create_host_path: false, so it must exist
+        # before compose up. Older source revisions mount a tracked file instead.
+        if [ "$compose_file" = "docker/docker-compose-hstore.yml" ] \
+          && [ -f "docker/set-hubble-pd-password.sh" ]; then
+          bash docker/set-hubble-pd-password.sh hstore
+        fi
 
         cat > /tmp/hg-ci-patch-server-config.sh <<'PATCH_SERVER'
         #!/usr/bin/env bash
