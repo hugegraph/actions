@@ -5,6 +5,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -68,6 +69,29 @@ class ReleaseTests(unittest.TestCase):
             archive.writestr("changed", "changed")
         with self.assertRaisesRegex(ValueError, "Manifest contents"):
             self.publish()
+
+    def test_post_test_verification_rejects_changed_build_output(self):
+        command = [
+            sys.executable,
+            str(SCRIPT),
+            "verify",
+            "--dist",
+            str(self.dist),
+            "--sha",
+            SHA,
+            "--version",
+            "1.7.0",
+            "--manifest-sha",
+            self.manifest_sha,
+        ]
+        before = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(before.returncode, 0, before.stderr)
+        # Simulate test code replacing bytes while retaining valid package metadata.
+        with zipfile.ZipFile(self.wheel, "a") as archive:
+            archive.writestr("injected.py", "raise RuntimeError('changed artifact')")
+        after = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertNotEqual(after.returncode, 0)
+        self.assertIn("Manifest contents mismatch", after.stderr)
 
     def test_source_or_version_mismatch_rejected(self):
         for sha, version in [("b" * 40, "1.7.0"), (SHA, "1.8.0")]:

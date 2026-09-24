@@ -53,7 +53,7 @@ Use `FROM --platform=$BUILDPLATFORM` for portable build stages so Maven/Node pac
 | `source_ref` | `main` | Branch, tag or SHA; resolved to an immutable commit |
 | `target` | `testpypi` | `testpypi` or `pypi`; production requires a tag exactly matching the package version |
 
-Create environments `testpypi` and `pypi`, each containing `PYPI_API_TOKEN`. Only the upload step receives the selected token.
+Create environments `testpypi` and `pypi`, each containing `PYPI_API_TOKEN`. Restrict `pypi` deployments to the `master` branch of this repository and require maintainer approval with admin bypass disabled; `testpypi` allows branch validation. This restriction applies to the workflow branch, not the source package tag. Only the upload step receives the selected token.
 
 ```mermaid
 flowchart LR
@@ -64,7 +64,7 @@ flowchart LR
     P --> R[PyPI · version tag required]
 ```
 
-The build job uses uv, checks wheel/sdist with Twine, and runs isolated installation and client tests on Python 3.10/3.11. The publish job verifies the manifest and remote filenames/hashes before uploading those exact artifacts. Unexpected remote files or conflicting hashes fail; identical files are skipped. For partial uploads, **re-run failed jobs** to reuse the original artifacts.
+The build job uses uv, checks wheel/sdist with Twine, records their hashes, and runs isolated installation and client tests on Python 3.10/3.11. It verifies the artifacts again after tests. The publish job checks the manifest and remote filenames/hashes before uploading those exact artifacts. Unexpected remote files or conflicting hashes fail; identical files are skipped. For partial uploads, **re-run failed jobs** to reuse the original artifacts.
 
 <details>
 <summary>Development checks</summary>

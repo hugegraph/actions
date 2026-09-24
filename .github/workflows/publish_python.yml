@@ -64,16 +64,21 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
       - name: Build and check distributions
+        id: manifest
+        env:
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          VERSION: ${{ steps.metadata.outputs.version }}
         run: |
           uv build --no-sources source/hugegraph-python-client --out-dir dist
           uvx --from twine==7.0.0 twine check --strict dist/*
+          python .github/scripts/python_release.py manifest --sha "$SOURCE_SHA" --version "$VERSION"
       - name: Isolated wheel and sdist smoke and client tests
         env:
           VERSION: ${{ steps.metadata.outputs.version }}
         run: |
           uv python install 3.10 3.11
           for version in 3.10 3.11; do
-            for artifact in "$GITHUB_WORKSPACE"/dist/*; do
+            for artifact in "$GITHUB_WORKSPACE"/dist/*.whl "$GITHUB_WORKSPACE"/dist/*.tar.gz; do
               scratch=$(mktemp -d)
               uv venv --python "$version" "$scratch/venv"
               uv pip install --python "$scratch/venv/bin/python" "$artifact"
@@ -86,12 +91,12 @@ jobs:
               )
             done
           done
-      - name: Record exact artifacts and source
-        id: manifest
+      - name: Verify artifacts unchanged after tests
         env:
           SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
           VERSION: ${{ steps.metadata.outputs.version }}
-        run: python .github/scripts/python_release.py manifest --sha "$SOURCE_SHA" --version "$VERSION"
+          MANIFEST_SHA: ${{ steps.manifest.outputs.manifest_sha }}
+        run: python .github/scripts/python_release.py verify --sha "$SOURCE_SHA" --version "$VERSION" --manifest-sha "$MANIFEST_SHA"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         id: upload
         with:
