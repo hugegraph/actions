@@ -71,8 +71,8 @@ jobs:
         env:
           VERSION: ${{ steps.metadata.outputs.version }}
         run: |
-          uv python install 3.9 3.10 3.11
-          for version in 3.9 3.10 3.11; do
+          uv python install 3.10 3.11
+          for version in 3.10 3.11; do
             for artifact in "$GITHUB_WORKSPACE"/dist/*; do
               scratch=$(mktemp -d)
               uv venv --python "$version" "$scratch/venv"
@@ -80,12 +80,9 @@ jobs:
               (
                 cd "$scratch"
                 "$scratch/venv/bin/python" -I -c 'import importlib.metadata as m, os; from pyhugegraph.client import PyHugeClient; assert m.version("hugegraph-python") == os.environ["VERSION"]'
-                # Upstream test fixtures require Python 3.10+; keep 3.9 as package smoke.
-                if [ "$version" != 3.9 ]; then
-                  uv pip install --python "$scratch/venv/bin/python" 'pytest==8.4.2'
-                  cp -R "$GITHUB_WORKSPACE/source/hugegraph-python-client/src/tests" "$scratch/tests"
-                  "$scratch/venv/bin/python" -m pytest tests -m 'unit or contract' -v --tb=short
-                fi
+                uv pip install --python "$scratch/venv/bin/python" 'pytest==8.4.2'
+                cp -R "$GITHUB_WORKSPACE/source/hugegraph-python-client/src/tests" "$scratch/tests"
+                "$scratch/venv/bin/python" -m pytest tests -m 'unit or contract' -v --tb=short
               )
             done
           done

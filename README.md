@@ -299,9 +299,8 @@ For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.g
 tags are supported. Every build checks out the resolved full commit SHA.
 
 The secret-free build job runs `uv build --no-sources`, strict Twine checks,
-and isolated wheel/sdist installation and import checks on Python 3.9/3.10/3.11.
-Both artifacts run upstream client unit/contract tests on 3.10/3.11 (the test
-fixtures require 3.10+). Tests use temporary virtual environments and only the
+and isolated wheel/sdist installation, import checks, and upstream client
+unit/contract tests on Python 3.10/3.11. Tests use temporary virtual environments and only the
 package dependencies plus pytest; server integration remains in upstream CI.
 A manifest records source SHA, version, filenames and SHA-256 hashes.
 
