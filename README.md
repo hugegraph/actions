@@ -52,6 +52,9 @@ Use `FROM --platform=$BUILDPLATFORM` for portable build stages so Maven/Node pac
 | --- | --- | --- |
 | `source_ref` | `main` | Branch, tag or SHA; resolved to an immutable commit |
 | `target` | `testpypi` | `testpypi` or `pypi`; production requires a tag exactly matching the package version |
+| `test_version` | Empty | Required for TestPyPI, e.g. `1.7.0.1`; must be empty for PyPI |
+
+Test versions use `x.y.z.n`, extending the source version with a fourth number only in the CI checkout. Choose a new number when testing changed code; there is no automatic numbering. Production reads `x.y.z` directly from the source metadata and requires a matching tag, with no version override. Four-part versions are a convention for TestPyPI, not Python prerelease markers.
 
 Create environments `testpypi` and `pypi`, each containing `PYPI_API_TOKEN`. Restrict `pypi` deployments to the `master` branch of this repository and require maintainer approval with admin bypass disabled; `testpypi` allows branch validation. This restriction applies to the workflow branch, not the source package tag. Only the upload step receives the selected token.
 

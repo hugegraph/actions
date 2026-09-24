@@ -62,13 +62,39 @@ def resolve(ref, target):
     output(source_sha=sha, tag=tag)
 
 
-def metadata(source, target, tag):
+def metadata(source, target, tag, version):
     project = tomllib.loads((source / MODULE / "pyproject.toml").read_text())["project"]
     require(project["name"] == PACKAGE, f"Distribution name must be {PACKAGE}")
-    version = project["version"]
-    require(re.fullmatch(r"[0-9][A-Za-z0-9.!+]*", version), "Invalid static version")
+    base = project["version"]
+    number = r"(?:0|[1-9][0-9]*)"
+    require(
+        re.fullmatch(rf"{number}\.{number}\.{number}", base),
+        "Source version must be x.y.z",
+    )
     if target == "pypi":
-        require(tag == version, "Tag/version mismatch")
+        require(not version, "test_version must be empty for PyPI")
+        require(tag == base, "Tag/version mismatch")
+        version = base
+    else:
+        require(
+            re.fullmatch(rf"{number}\.{number}\.{number}\.{number}", version),
+            "TestPyPI requires test_version in x.y.z.n format",
+        )
+        require(
+            version.rsplit(".", 1)[0] == base,
+            "Test version must extend the source version",
+        )
+        subprocess.run(
+            [
+                "uv",
+                "version",
+                "--project",
+                str(source / MODULE),
+                "--frozen",
+                version,
+            ],
+            check=True,
+        )
     output(version=version)
 
 
@@ -218,12 +244,13 @@ def main():
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     parser.add_argument("--sha", default="")
     parser.add_argument("--version", default="")
+    parser.add_argument("--test-version", default="")
     parser.add_argument("--manifest-sha", default="")
     args = parser.parse_args()
     if args.command == "resolve":
         resolve(args.source_ref, args.target)
     elif args.command == "metadata":
-        metadata(args.source, args.target, args.tag)
+        metadata(args.source, args.target, args.tag, args.test_version)
     elif args.command == "manifest":
         manifest(args.dist, args.sha, args.version)
     elif args.command == "verify":

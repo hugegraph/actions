@@ -264,15 +264,75 @@ class ReleaseTests(unittest.TestCase):
             '[project]\nname="hugegraph-python-client"\nversion="1.7.0"\n'
         )
         with self.assertRaisesRegex(ValueError, "Distribution name"):
-            release.metadata(self.root, "testpypi", "")
+            release.metadata(self.root, "testpypi", "", "1.7.0.1")
         project.write_text('[project]\nname="hugegraph-python"\nversion="1.7.0"\n')
         for tag in ("main", "client-v1.7.0", "v1.7.0", "", "1.7.0-rc1"):
             with (
                 self.subTest(tag=tag),
                 self.assertRaisesRegex(ValueError, "Tag/version"),
             ):
-                release.metadata(self.root, "pypi", tag)
-        release.metadata(self.root, "pypi", "1.7.0")
+                release.metadata(self.root, "pypi", tag, "")
+        with patch.object(release.subprocess, "run") as update:
+            release.metadata(self.root, "pypi", "1.7.0", "")
+        update.assert_not_called()
+        self.assertIn("version=1.7.0", (self.root / "output").read_text())
+
+    def test_explicit_version_rules(self):
+        module = self.root / release.MODULE
+        module.mkdir()
+        (module / "pyproject.toml").write_text(
+            '[project]\nname="hugegraph-python"\nversion="1.7.0"\n'
+        )
+        invalid = [
+            ("testpypi", ""),
+            ("testpypi", "1.7.0"),
+            ("testpypi", "1.7.0rc1"),
+            ("testpypi", "1.7.0.dev1"),
+            ("testpypi", "1.7.0.01"),
+            ("testpypi", "1.7.0.1.2"),
+            ("testpypi", "1.8.0.1"),
+            ("pypi", "1.7.0.1"),
+            ("pypi", "1.7.0"),
+            ("pypi", "1.7.0rc1"),
+            ("pypi", "1.8.0"),
+        ]
+        for target, version in invalid:
+            with (
+                self.subTest(target=target, version=version),
+                patch.object(release.subprocess, "run") as update,
+                self.assertRaises(ValueError),
+            ):
+                release.metadata(self.root, target, "1.7.0", version)
+            update.assert_not_called()
+        with patch.object(release.subprocess, "run") as update:
+            release.metadata(self.root, "testpypi", "", "1.7.0.12")
+        update.assert_called_once_with(
+            [
+                "uv",
+                "version",
+                "--project",
+                str(module),
+                "--frozen",
+                "1.7.0.12",
+            ],
+            check=True,
+        )
+        self.assertIn("version=1.7.0.12", (self.root / "output").read_text())
+
+    def test_source_version_must_have_three_numeric_parts(self):
+        module = self.root / release.MODULE
+        module.mkdir()
+        for version in ("1.7", "1.7.0.1", "1.7.0rc1", "1.7.0.dev1", "01.7.0"):
+            (module / "pyproject.toml").write_text(
+                f'[project]\nname="hugegraph-python"\nversion="{version}"\n'
+            )
+            with (
+                self.subTest(version=version),
+                patch.object(release.subprocess, "run") as update,
+                self.assertRaisesRegex(ValueError, "Source version must be"),
+            ):
+                release.metadata(self.root, "pypi", version, "")
+            update.assert_not_called()
 
 
 if __name__ == "__main__":
