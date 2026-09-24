@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: 'apache/hugegraph-ai ref (PyPI requires a version tag)'
+        description: 'apache/hugegraph-ai branch, tag, or commit SHA'
         required: true
         default: main
         type: string
@@ -46,8 +46,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REF: ${{ inputs.source_ref }}
-          TARGET: ${{ inputs.target }}
-        run: python .github/scripts/python_release.py resolve --source-ref "$SOURCE_REF" --target "$TARGET"
+        run: python .github/scripts/python_release.py resolve --source-ref "$SOURCE_REF"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: apache/hugegraph-ai
@@ -62,12 +61,11 @@ jobs:
         id: metadata
         env:
           TARGET: ${{ inputs.target }}
-          TAG: ${{ steps.resolve.outputs.tag }}
           SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
           TEST_VERSION: ${{ inputs.test_version }}
         run: |
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
-          python .github/scripts/python_release.py metadata --target "$TARGET" --tag "$TAG" --test-version "$TEST_VERSION"
+          python .github/scripts/python_release.py metadata --target "$TARGET" --test-version "$TEST_VERSION"
       - name: Build and check distributions
         id: manifest
         env:
