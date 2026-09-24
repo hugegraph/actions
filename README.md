@@ -289,6 +289,60 @@ For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.g
   - [`.github/workflows/publish_hugegraph_hubble.yml`](./.github/workflows/publish_hugegraph_hubble.yml)
   - [`.github/workflows/publish_computer_image.yml`](./.github/workflows/publish_computer_image.yml)
 
+## Python package release (manual)
+
+[`publish_python.yml`](.github/workflows/publish_python.yml) builds only
+`apache/hugegraph-ai/hugegraph-python-client`, requiring distribution name
+`hugegraph-python`. Dispatch with `source_ref` (default `main`) and `target`
+(`testpypi`, default, or `pypi`). PyPI requires an existing tag named exactly
+`VERSION`, matching package metadata without any prefix; annotated
+tags are supported. Every build checks out the resolved full commit SHA.
+
+The secret-free build job runs `uv build --no-sources`, strict Twine checks,
+and isolated wheel/sdist installation and import checks on Python 3.9/3.10/3.11.
+Both artifacts run upstream client unit/contract tests on 3.10/3.11 (the test
+fixtures require 3.10+). Tests use temporary virtual environments and only the
+package dependencies plus pytest; server integration remains in upstream CI.
+A manifest records source SHA, version, filenames and SHA-256 hashes.
+
+The publish job downloads the original immutable artifact ID, verifies the
+manifest against the build output, and preflights **all** filenames against the
+selected index before uploading. Identical files are skipped; any same-name
+hash conflict fails the whole preflight. Partial retries upload only missing
+files. Re-run failed jobs to retain the original bytes; a new build can produce
+different bytes and must not replace an existing release. Publication is
+serialized by target/version. uv's fixed `--check-url` performs an additional
+hash check for concurrent uploads, accepting identical bytes and rejecting
+conflicting bytes on both indexes.
+
+Configure GitHub environments `testpypi` and `pypi`, each with secret
+`PYPI_API_TOKEN` (and appropriate branch/reviewer restrictions). Only the final
+publish step receives it as `UV_PUBLISH_TOKEN`; `uv publish` uses fixed index
+URLs and `--trusted-publishing never`. Publish never installs, builds, imports,
+or checks out source package code. Actions are commit-pinned and uv is pinned
+to 0.12.18.
+
+Local guard checks (no credentials or uploads):
+
+```bash
+uv run --no-project --python 3.11 python -m unittest discover -s tests -p 'test_python_release.py' -v
+actionlint .github/workflows/publish_python.yml
+```
+
+To verify downloaded artifacts without any network access, token, or upload,
+use the source SHA, version and manifest SHA from the successful build outputs:
+
+```bash
+uv run --no-project --python 3.11 python .github/scripts/python_release.py verify \
+  --dist dist --sha "$SOURCE_SHA" --version "$VERSION" --manifest-sha "$MANIFEST_SHA"
+```
+
+The old upstream name `hugegraph-python-client` is deliberately rejected.
+For the first CI run with the AI release branch, use
+`source_ref=refs/heads/cx-python-release` and `target=testpypi`.
+The new manual workflow registers after it reaches the default branch;
+local guard tests do not establish source-build or publication success.
+
 ## Practical Notes
 
 - `latest` workflows typically run on a schedule and accept manual dispatch.

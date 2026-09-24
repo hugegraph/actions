@@ -1,0 +1,140 @@
+name: Publish HugeGraph Python
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'apache/hugegraph-ai ref (PyPI requires a version tag)'
+        required: true
+        default: main
+        type: string
+      target:
+        description: Package index and GitHub environment
+        required: true
+        type: choice
+        default: testpypi
+        options: [testpypi, pypi]
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: '0.12.18'
+
+jobs:
+  build-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      version: ${{ steps.metadata.outputs.version }}
+      manifest_sha: ${{ steps.manifest.outputs.manifest_sha }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Resolve immutable source
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          TARGET: ${{ inputs.target }}
+        run: python .github/scripts/python_release.py resolve --source-ref "$SOURCE_REF" --target "$TARGET"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: apache/hugegraph-ai
+          ref: ${{ steps.resolve.outputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - name: Validate source metadata and release tag
+        id: metadata
+        env:
+          TARGET: ${{ inputs.target }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+        run: |
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          python .github/scripts/python_release.py metadata --target "$TARGET" --tag "$TAG"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - name: Build and check distributions
+        run: |
+          uv build --no-sources source/hugegraph-python-client --out-dir dist
+          uvx --from twine==7.0.0 twine check --strict dist/*
+      - name: Isolated wheel and sdist smoke and client tests
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          uv python install 3.9 3.10 3.11
+          for version in 3.9 3.10 3.11; do
+            for artifact in "$GITHUB_WORKSPACE"/dist/*; do
+              scratch=$(mktemp -d)
+              uv venv --python "$version" "$scratch/venv"
+              uv pip install --python "$scratch/venv/bin/python" "$artifact"
+              (
+                cd "$scratch"
+                "$scratch/venv/bin/python" -I -c 'import importlib.metadata as m, os; from pyhugegraph.client import PyHugeClient; assert m.version("hugegraph-python") == os.environ["VERSION"]'
+                # Upstream test fixtures require Python 3.10+; keep 3.9 as package smoke.
+                if [ "$version" != 3.9 ]; then
+                  uv pip install --python "$scratch/venv/bin/python" 'pytest==8.4.2'
+                  cp -R "$GITHUB_WORKSPACE/source/hugegraph-python-client/src/tests" "$scratch/tests"
+                  "$scratch/venv/bin/python" -m pytest tests -m 'unit or contract' -v --tb=short
+                fi
+              )
+            done
+          done
+      - name: Record exact artifacts and source
+        id: manifest
+        env:
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+        run: python .github/scripts/python_release.py manifest --sha "$SOURCE_SHA" --version "$VERSION"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: python-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: ${{ inputs.target }}
+    concurrency:
+      group: python-publish-${{ inputs.target }}-${{ needs.build-check.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-check.outputs.artifact_id }}
+          merge-multiple: true
+          path: dist
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - name: Verify all files, preflight hashes, and publish missing artifacts
+        env:
+          SOURCE_SHA: ${{ needs.build-check.outputs.source_sha }}
+          VERSION: ${{ needs.build-check.outputs.version }}
+          MANIFEST_SHA: ${{ needs.build-check.outputs.manifest_sha }}
+          TARGET: ${{ inputs.target }}
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python .github/scripts/python_release.py publish --sha "$SOURCE_SHA" \
+            --version "$VERSION" --manifest-sha "$MANIFEST_SHA" --target "$TARGET"
