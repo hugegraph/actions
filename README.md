@@ -11,14 +11,9 @@ Thin component wrappers call either [the standard image publisher](.github/workf
 | Latest | Scheduled or manual | Default source uses `latest`; other refs can derive a tag or use `image_tag` | Skipped only for the configured default source without an explicit tag |
 | Release | Manual | Explicit `source_ref`; standard images can derive the version, PD/Store/Server requires `image_tag=x.y.z` | Always runs |
 
-Manual latest runs default to validation (`publish=false`): build all configured platforms and read caches without pushing images, exporting caches, or updating `LAST_*_HASH`. Scheduled runs publish automatically. Set `publish=true` to publish manually; use an explicit `image_tag` for branch builds. PD/Store/Server also supports `dry_run=true` to force a fresh validation of unchanged master.
+Manual latest runs default to validation (`publish=false`): build all configured platforms and read caches without pushing images, exporting caches, or updating `LAST_*_HASH`. Scheduled runs publish automatically. Set `publish=true` to publish manually; use an explicit `image_tag` for branch builds.
 
-Common image inputs:
-
-- `source_repository`: source repository; built-in wrappers allow only the component's Apache and HugeGraph repositories.
-- `source_ref`: branch, tag or commit, resolved to a fixed SHA.
-- `image_tag`: destination tag, independent of the source ref.
-- `publish`: controls image pushes and cache exports in latest workflows.
+Use `source_repository` to select the component's Apache or HugeGraph repository and `source_ref` for a branch, tag or commit. The resolved source SHA and destination `image_tag` are independent.
 
 The standard publisher selects Dockerfiles, build contexts, platforms and optional smoke tests through `build_matrix_json`. Images carry OCI source/revision labels. Successful latest publications can update `LAST_*_HASH`.
 
@@ -54,7 +49,19 @@ Use `FROM --platform=$BUILDPLATFORM` for portable build stages so Maven/Node pac
 
 Create environments `testpypi` and `pypi`, each containing `PYPI_API_TOKEN`. Only the upload step receives the selected token.
 
+```mermaid
+flowchart LR
+    S[Source SHA] --> B[Build and test]
+    B --> A[Wheel + sdist + hash manifest]
+    A --> P[Verify and publish]
+    P --> T[TestPyPI · default]
+    P --> R[PyPI · version tag required]
+```
+
 The build job uses uv, checks wheel/sdist with Twine, and runs isolated installation and client tests on Python 3.10/3.11. The publish job verifies the manifest and remote filenames/hashes before uploading those exact artifacts. Unexpected remote files or conflicting hashes fail; identical files are skipped. For partial uploads, **re-run failed jobs** to reuse the original artifacts.
+
+<details>
+<summary>Development checks</summary>
 
 Local checks (no upload):
 
@@ -63,19 +70,10 @@ uv run --no-project --python 3.11 python -m unittest discover -s tests -p 'test_
 actionlint .github/workflows/publish_python.yml
 ```
 
+</details>
+
 A new manual workflow must first reach the default branch to register dispatch; subsequent runs can select another workflow branch with `gh workflow run --ref`.
 
-## Workflow map and maintenance
+## Maintenance
 
-| Area | Entry points |
-| --- | --- |
-| AI | [Latest](.github/workflows/publish_latest_ai_image.yml) · [Release](.github/workflows/publish_release_ai_image.yml) |
-| Loader | [Latest](.github/workflows/publish_latest_loader_image.yml) · [Release](.github/workflows/publish_release_loader_image.yml) |
-| Hubble | [Latest](.github/workflows/publish_latest_hubble_image.yml) · [Release](.github/workflows/publish_release_hubble_image.yml) |
-| Vermeer | [Latest](.github/workflows/publish_latest_vermeer_image.yml) · [Release](.github/workflows/publish_release_vermeer_image.yml) |
-| PD/Store/Server | [Latest](.github/workflows/publish_latest_pd_store_server_image.yml) · [Release](.github/workflows/publish_release_pd_store_server_image.yml) |
-| Python | [Manual release](.github/workflows/publish_python.yml) |
-| Apache source release | [Validation](.github/workflows/validate-release.yml) |
-| Legacy/special cases | [Hubble](.github/workflows/publish_hugegraph_hubble.yml) · [Computer](.github/workflows/publish_computer_image.yml) |
-
-Keep trigger policy and component settings in wrappers, shared build behavior in reusable workflows. Preserve the distinct latest/release semantics. Use a dedicated workflow for materially different checks or ordering, and record measured build timings in PRs or CI reports.
+Browse the [workflow directory](.github/workflows) for component entry points. Keep trigger policy and component settings in wrappers, shared build behavior in reusable workflows, and preserve the distinct latest/release semantics. Use dedicated workflows for different validation or sequencing requirements.
