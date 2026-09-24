@@ -291,56 +291,25 @@ For example, [`.github/workflows/publish_latest_pd_store_server_image.yml`](./.g
 
 ## Python package release (manual)
 
-[`publish_python.yml`](.github/workflows/publish_python.yml) builds only
-`apache/hugegraph-ai/hugegraph-python-client`, requiring distribution name
-`hugegraph-python`. Dispatch with `source_ref` (default `main`) and `target`
-(`testpypi`, default, or `pypi`). PyPI requires an existing tag named exactly
-`VERSION`, matching package metadata without any prefix; annotated
-tags are supported. Every build checks out the resolved full commit SHA.
+[`publish_python.yml`](.github/workflows/publish_python.yml) publishes `hugegraph-python` from `apache/hugegraph-ai`. Run it manually with:
 
-The secret-free build job runs `uv build --no-sources`, strict Twine checks,
-and isolated wheel/sdist installation, import checks, and upstream client
-unit/contract tests on Python 3.10/3.11. Tests use temporary virtual environments and only the
-package dependencies plus pytest; server integration remains in upstream CI.
-A manifest records source SHA, version, filenames and SHA-256 hashes.
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `source_ref` | `main` | Source branch, tag or SHA; resolved to an immutable commit |
+| `target` | `testpypi` | `testpypi` or `pypi`; production requires a tag exactly matching the package version |
 
-The publish job downloads the original immutable artifact ID, verifies the
-manifest against the build output, and preflights **all** filenames against the
-selected index before uploading. Identical files are skipped; any same-name
-hash conflict fails the whole preflight. Partial retries upload only missing
-files. Re-run failed jobs to retain the original bytes; a new build can produce
-different bytes and must not replace an existing release. Publication is
-serialized by target/version. uv's fixed `--check-url` performs an additional
-hash check for concurrent uploads, accepting identical bytes and rejecting
-conflicting bytes on both indexes.
+Create environments `testpypi` and `pypi`, each containing `PYPI_API_TOKEN`. Only the upload step receives the selected token.
 
-Configure GitHub environments `testpypi` and `pypi`, each with secret
-`PYPI_API_TOKEN` (and appropriate branch/reviewer restrictions). Only the final
-publish step receives it as `UV_PUBLISH_TOKEN`; `uv publish` uses fixed index
-URLs and `--trusted-publishing never`. Publish never installs, builds, imports,
-or checks out source package code. Actions are commit-pinned and uv is pinned
-to 0.12.18.
+The build job uses uv, checks both wheel and sdist with Twine, and runs isolated installation and client tests on Python 3.10/3.11. The publish job uploads those exact artifacts after checking the manifest and remote filenames/hashes. Unexpected remote files or conflicting hashes fail; identical files are skipped. To retry a partial upload, **re-run failed jobs** so the original artifacts are reused.
 
-Local guard checks (no credentials or uploads):
+Local checks (no upload):
 
 ```bash
 uv run --no-project --python 3.11 python -m unittest discover -s tests -p 'test_python_release.py' -v
 actionlint .github/workflows/publish_python.yml
 ```
 
-To verify downloaded artifacts without any network access, token, or upload,
-use the source SHA, version and manifest SHA from the successful build outputs:
-
-```bash
-uv run --no-project --python 3.11 python .github/scripts/python_release.py verify \
-  --dist dist --sha "$SOURCE_SHA" --version "$VERSION" --manifest-sha "$MANIFEST_SHA"
-```
-
-The old upstream name `hugegraph-python-client` is deliberately rejected.
-For the first CI run with the AI release branch, use
-`source_ref=refs/heads/cx-python-release` and `target=testpypi`.
-The new manual workflow registers after it reaches the default branch;
-local guard tests do not establish source-build or publication success.
+The workflow must first reach the default branch to register manual dispatch; subsequent runs can select another workflow branch with `gh workflow run --ref`.
 
 ## Practical Notes
 

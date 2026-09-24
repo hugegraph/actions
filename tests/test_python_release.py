@@ -121,6 +121,19 @@ class ReleaseTests(unittest.TestCase):
             self.publish()
         upload.assert_not_called()
 
+    def test_unexpected_remote_file_prevents_upload_and_noop(self):
+        files = release.inventory(self.dist, "1.7.0")
+        extra = "hugegraph_python-1.7.0-cp310-cp310-manylinux_2_17_x86_64.whl"
+        for remote in ({extra: "b" * 64}, {**files, extra: "b" * 64}):
+            with (
+                self.subTest(remote=remote),
+                patch.object(release, "remote_files", return_value=remote),
+                patch.object(release.subprocess, "run") as upload,
+                self.assertRaisesRegex(ValueError, "Unexpected remote artifacts"),
+            ):
+                self.publish()
+            upload.assert_not_called()
+
     def test_partial_retry_uploads_only_missing_file(self):
         with (
             patch.object(

@@ -177,6 +177,8 @@ def publish(dist, sha, version, manifest_sha, target):
     files = verify(dist, sha, version, manifest_sha)
     remote = remote_files(target, version)
     # Finish the entire preflight before starting uv, including partial retries.
+    unexpected = sorted(remote.keys() - files.keys())
+    require(not unexpected, f"Unexpected remote artifacts: {', '.join(unexpected)}")
     for name, checksum in files.items():
         require(
             name not in remote or remote[name] == checksum,
