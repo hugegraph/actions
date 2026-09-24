@@ -2,38 +2,11 @@
 
 Shared workflows for publishing HugeGraph Docker images and Python packages, validating releases, and repository automation.
 
-## Release architecture
+## Image publishing architecture
 
-```text
-                        hugegraph/actions
+![Latest and release wrappers share standard or PD/Store/Server image workflows; validated images reach Docker Hub only when publishing is enabled.](.github/assets/image-publishing-architecture.png)
 
-  Scheduled / manual                       Manual release
-          |                                      |
-  publish_latest_*.yml                   publish_release_*.yml
-          |                                      |
-          +------------------+-------------------+
-                             |
-               Component wrappers select
-               source ref, image tag and policy
-                             |
-          +------------------+-------------------+
-          |                                      |
-  AI / Loader / Hubble / Vermeer          PD / Store / Server
-          |                                      |
-  _publish_image_reusable.yml     _publish_pd_store_server_reusable.yml
-          |                                      |
-  Build + optional smoke tests       Build + graph/CRUD + smoke tests
-          |                                      |
-          +------------------+-------------------+
-                             |
-                   Docker Hub (if publishing)
-
-  Manual Python release (independent workflow)
-          |
-  publish_python.yml --> Build/test --> Verified artifacts --> TestPyPI / PyPI
-```
-
-Wrappers define when and what to publish; the two reusable workflows implement image building and validation. Each run resolves its source repository/ref to a fixed commit. Python package publishing has its own build and upload jobs.
+Wrappers define when and what to publish; the two reusable workflows implement image building and validation. Each run resolves its source repository/ref to a fixed commit.
 
 ## Docker images
 
