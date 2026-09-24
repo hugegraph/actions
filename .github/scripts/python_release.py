@@ -46,23 +46,14 @@ def github(endpoint):
     )
 
 
-def resolve(ref, target):
+def resolve(ref):
     require(bool(ref) and not any(c in ref for c in "\n\r"), "Invalid source ref")
-    tag = ref.removeprefix("refs/tags/")
-    if target == "pypi":
-        obj = github("git/ref/tags/" + urllib.parse.quote(tag, safe=""))["object"]
-        while obj["type"] == "tag":
-            obj = github("git/tags/" + obj["sha"])["object"]
-        require(obj["type"] == "commit", "Tag must identify a commit")
-        sha = obj["sha"]
-    else:
-        sha = github("commits/" + urllib.parse.quote(ref, safe=""))["sha"]
-        tag = ""
+    sha = github("commits/" + urllib.parse.quote(ref, safe=""))["sha"]
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "Invalid source SHA")
-    output(source_sha=sha, tag=tag)
+    output(source_sha=sha)
 
 
-def metadata(source, target, tag, version):
+def metadata(source, target, version):
     project = tomllib.loads((source / MODULE / "pyproject.toml").read_text())["project"]
     require(project["name"] == PACKAGE, f"Distribution name must be {PACKAGE}")
     base = project["version"]
@@ -73,7 +64,6 @@ def metadata(source, target, tag, version):
     )
     if target == "pypi":
         require(not version, "test_version must be empty for PyPI")
-        require(tag == base, "Tag/version mismatch")
         version = base
     else:
         require(
@@ -240,7 +230,6 @@ def main():
     parser.add_argument("--target", choices=TARGETS, default="testpypi")
     parser.add_argument("--source-ref", default="main")
     parser.add_argument("--source", type=Path, default=Path("source"))
-    parser.add_argument("--tag", default="")
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     parser.add_argument("--sha", default="")
     parser.add_argument("--version", default="")
@@ -248,9 +237,9 @@ def main():
     parser.add_argument("--manifest-sha", default="")
     args = parser.parse_args()
     if args.command == "resolve":
-        resolve(args.source_ref, args.target)
+        resolve(args.source_ref)
     elif args.command == "metadata":
-        metadata(args.source, args.target, args.tag, args.test_version)
+        metadata(args.source, args.target, args.test_version)
     elif args.command == "manifest":
         manifest(args.dist, args.sha, args.version)
     elif args.command == "verify":

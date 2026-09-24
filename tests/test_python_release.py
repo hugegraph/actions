@@ -233,28 +233,40 @@ class ReleaseTests(unittest.TestCase):
         ):
             release.remote_files("pypi", "1.7.0")
 
-    def test_annotated_and_lightweight_tag_resolution(self):
-        for annotated in (False, True):
-            responses = [{"object": {"type": "commit", "sha": SHA}}]
-            if annotated:
-                responses.insert(0, {"object": {"type": "tag", "sha": "b" * 40}})
-            with patch.object(release, "github", side_effect=responses) as github:
-                release.resolve("refs/tags/1.7.0", "pypi")
-                self.assertEqual(github.call_args_list[0].args, ("git/ref/tags/1.7.0",))
+    def test_source_refs_resolve_to_exact_commit(self):
+        for ref in (
+            "main",
+            "release-1.7",
+            "refs/heads/release-1.7",
+            "1.7.0",
+            "refs/tags/1.7.0",
+            SHA,
+        ):
+            with (
+                self.subTest(ref=ref),
+                patch.object(release, "github", return_value={"sha": SHA}) as github,
+            ):
+                release.resolve(ref)
+            github.assert_called_once_with(
+                "commits/" + release.urllib.parse.quote(ref, safe="")
+            )
+        self.assertIn("source_sha=" + SHA, (self.root / "output").read_text())
 
-    def test_official_missing_tag_cannot_fall_back_to_branch(self):
+    def test_unknown_ref_fails_without_fallback(self):
         with (
             patch.object(
                 release, "github", side_effect=subprocess.CalledProcessError(1, "gh")
             ),
             self.assertRaises(subprocess.CalledProcessError),
         ):
-            release.resolve("main", "pypi")
+            release.resolve("missing-branch")
 
-    def test_branch_resolves_exact_commit(self):
-        with patch.object(release, "github", return_value={"sha": SHA}) as github:
-            release.resolve("refs/heads/cx-python-release", "testpypi")
-        github.assert_called_once_with("commits/refs%2Fheads%2Fcx-python-release")
+    def test_invalid_resolved_sha_is_rejected(self):
+        with (
+            patch.object(release, "github", return_value={"sha": "main"}),
+            self.assertRaisesRegex(ValueError, "Invalid source SHA"),
+        ):
+            release.resolve("main")
 
     def test_metadata_guards_before_build(self):
         module = self.root / release.MODULE
@@ -264,17 +276,13 @@ class ReleaseTests(unittest.TestCase):
             '[project]\nname="hugegraph-python-client"\nversion="1.7.0"\n'
         )
         with self.assertRaisesRegex(ValueError, "Distribution name"):
-            release.metadata(self.root, "testpypi", "", "1.7.0.1")
+            release.metadata(self.root, "testpypi", "1.7.0.1")
         project.write_text('[project]\nname="hugegraph-python"\nversion="1.7.0"\n')
-        for tag in ("main", "client-v1.7.0", "v1.7.0", "", "1.7.0-rc1"):
-            with (
-                self.subTest(tag=tag),
-                self.assertRaisesRegex(ValueError, "Tag/version"),
-            ):
-                release.metadata(self.root, "pypi", tag, "")
+        original = project.read_bytes()
         with patch.object(release.subprocess, "run") as update:
-            release.metadata(self.root, "pypi", "1.7.0", "")
+            release.metadata(self.root, "pypi", "")
         update.assert_not_called()
+        self.assertEqual(project.read_bytes(), original)
         self.assertIn("version=1.7.0", (self.root / "output").read_text())
 
     def test_explicit_version_rules(self):
@@ -302,10 +310,10 @@ class ReleaseTests(unittest.TestCase):
                 patch.object(release.subprocess, "run") as update,
                 self.assertRaises(ValueError),
             ):
-                release.metadata(self.root, target, "1.7.0", version)
+                release.metadata(self.root, target, version)
             update.assert_not_called()
         with patch.object(release.subprocess, "run") as update:
-            release.metadata(self.root, "testpypi", "", "1.7.0.12")
+            release.metadata(self.root, "testpypi", "1.7.0.12")
         update.assert_called_once_with(
             [
                 "uv",
@@ -331,7 +339,7 @@ class ReleaseTests(unittest.TestCase):
                 patch.object(release.subprocess, "run") as update,
                 self.assertRaisesRegex(ValueError, "Source version must be"),
             ):
-                release.metadata(self.root, "pypi", version, "")
+                release.metadata(self.root, "pypi", "")
             update.assert_not_called()
 
 
