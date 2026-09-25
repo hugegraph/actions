@@ -248,9 +248,133 @@ class ReleaseTests(unittest.TestCase):
             ):
                 release.resolve(ref)
             github.assert_called_once_with(
-                "commits/" + release.urllib.parse.quote(ref, safe="")
+                "commits/" + release.urllib.parse.quote(ref, safe=""), release.SOURCE
             )
         self.assertIn("source_sha=" + SHA, (self.root / "output").read_text())
+
+    def test_fork_source_resolves_and_unlisted_repository_is_rejected(self):
+        with patch.object(release, "github", return_value={"sha": SHA}) as github:
+            release.resolve("graph-mcp", "hugegraph/hugegraph-ai")
+        github.assert_called_once_with("commits/graph-mcp", "hugegraph/hugegraph-ai")
+        with patch.object(release, "github") as github:
+            with self.assertRaisesRegex(ValueError, "Unsupported source"):
+                release.resolve("main", "untrusted/repo")
+        github.assert_not_called()
+
+    def test_mcp_artifacts_bind_component_and_source(self):
+        self.wheel.unlink()
+        self.sdist.unlink()
+        self.wheel = self.dist / "hugegraph_mcp-1.7.0-py3-none-any.whl"
+        self.sdist = self.dist / "hugegraph_mcp-1.7.0.tar.gz"
+        self.artifacts(name="hugegraph-mcp")
+        release.manifest(self.dist, SHA, "1.7.0", "mcp", "hugegraph/hugegraph-ai")
+        checksum = release.digest(self.dist / "manifest.json")
+        files = release.verify(
+            self.dist, SHA, "1.7.0", checksum, "mcp", "hugegraph/hugegraph-ai"
+        )
+        self.assertEqual(set(files), {self.wheel.name, self.sdist.name})
+        with self.assertRaises(ValueError):
+            release.verify(
+                self.dist, SHA, "1.7.0", checksum, "client", "hugegraph/hugegraph-ai"
+            )
+        with self.assertRaisesRegex(ValueError, "Manifest contents"):
+            release.verify(self.dist, SHA, "1.7.0", checksum, "mcp", release.SOURCE)
+        with (
+            patch.object(release, "remote_files", return_value={}) as remote,
+            patch.object(release.subprocess, "run") as upload,
+            patch.dict(os.environ, {"UV_PUBLISH_TOKEN": "test-placeholder"}),
+        ):
+            release.publish(
+                self.dist,
+                SHA,
+                "1.7.0",
+                checksum,
+                "pypi",
+                "mcp",
+                "hugegraph/hugegraph-ai",
+            )
+        remote.assert_called_once_with("pypi", "1.7.0", "mcp")
+        self.assertIn(str(self.wheel.resolve()), upload.call_args.args[0])
+
+    def test_mcp_remote_lookup_uses_mcp_project(self):
+        with patch.object(
+            release.urllib.request, "urlopen", return_value=io.BytesIO(b'{"urls": []}')
+        ) as request:
+            self.assertEqual(release.remote_files("pypi", "1.7.1", "mcp"), {})
+        request.assert_called_once_with(
+            "https://pypi.org/pypi/hugegraph-mcp/1.7.1/json", timeout=30
+        )
+
+    def test_mcp_metadata_selects_only_mcp_module(self):
+        module = self.root / "hugegraph-mcp"
+        module.mkdir()
+        (module / "pyproject.toml").write_text(
+            '[project]\nname="hugegraph-mcp"\nversion="1.7.1"\n'
+        )
+        release.metadata(self.root, "pypi", "", "mcp")
+        output = (self.root / "output").read_text()
+        self.assertIn("module=hugegraph-mcp", output)
+        self.assertIn("package=hugegraph-mcp", output)
+        self.assertIn("version=1.7.1", output)
+
+    def test_test_client_pins_exact_published_wheel(self):
+        version = "1.7.1.2"
+        filename = f"hugegraph_python-{version}-py3-none-any.whl"
+        url = "https://test-files.pythonhosted.org/packages/hash/" + filename
+        wheel = {"filename": filename, "url": url, "digests": {"sha256": "b" * 64}}
+        data = {
+            "info": {"name": "hugegraph-python", "version": version},
+            "urls": [wheel],
+        }
+        with patch.object(
+            release.urllib.request,
+            "urlopen",
+            return_value=io.BytesIO(json.dumps(data).encode()),
+        ) as request:
+            release.test_client(version)
+        request.assert_called_once_with(
+            f"https://test.pypi.org/pypi/hugegraph-python/{version}/json", timeout=30
+        )
+        self.assertIn(
+            f"client_requirement=hugegraph-python @ {url}#sha256=" + "b" * 64,
+            (self.root / "output").read_text(),
+        )
+        for updates in (
+            {"url": "http://test-files.pythonhosted.org/" + filename},
+            {"url": "https://evil.example/" + filename},
+            {"digests": {"sha256": ""}},
+            {"yanked": True},
+        ):
+            bad = {**data, "urls": [{**wheel, **updates}]}
+            with (
+                self.subTest(updates=updates),
+                patch.object(
+                    release.urllib.request,
+                    "urlopen",
+                    return_value=io.BytesIO(json.dumps(bad).encode()),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    release.test_client(version)
+        for wheels in ([], [wheel, wheel]):
+            bad = {**data, "urls": wheels}
+            with patch.object(
+                release.urllib.request,
+                "urlopen",
+                return_value=io.BytesIO(json.dumps(bad).encode()),
+            ):
+                with self.assertRaisesRegex(ValueError, "Expected one"):
+                    release.test_client(version)
+
+    def test_invalid_test_client_version_fails_before_network(self):
+        for version in ("", "1.7.1", "../json", "1.7.1.01", "1.7.1rc1"):
+            with (
+                self.subTest(version=version),
+                patch.object(release.urllib.request, "urlopen") as request,
+            ):
+                with self.assertRaisesRegex(ValueError, "Test client version"):
+                    release.test_client(version)
+            request.assert_not_called()
 
     def test_unknown_ref_fails_without_fallback(self):
         with (
@@ -269,7 +393,7 @@ class ReleaseTests(unittest.TestCase):
             release.resolve("main")
 
     def test_metadata_guards_before_build(self):
-        module = self.root / release.MODULE
+        module = self.root / release.COMPONENTS["client"][1]
         module.mkdir()
         project = module / "pyproject.toml"
         project.write_text(
@@ -286,7 +410,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("version=1.7.0", (self.root / "output").read_text())
 
     def test_explicit_version_rules(self):
-        module = self.root / release.MODULE
+        module = self.root / release.COMPONENTS["client"][1]
         module.mkdir()
         (module / "pyproject.toml").write_text(
             '[project]\nname="hugegraph-python"\nversion="1.7.0"\n'
@@ -328,7 +452,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("version=1.7.0.12", (self.root / "output").read_text())
 
     def test_source_version_must_have_three_numeric_parts(self):
-        module = self.root / release.MODULE
+        module = self.root / release.COMPONENTS["client"][1]
         module.mkdir()
         for version in ("1.7", "1.7.0.1", "1.7.0rc1", "1.7.0.dev1", "01.7.0"):
             (module / "pyproject.toml").write_text(

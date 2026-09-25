@@ -3,8 +3,25 @@ name: Publish HugeGraph Python
 on:
   workflow_dispatch:
     inputs:
+      component:
+        description: Python component
+        required: true
+        type: choice
+        default: client
+        options: [client, mcp]
+      source_repository:
+        description: Source repository
+        required: true
+        type: choice
+        default: apache/hugegraph-ai
+        options: [apache/hugegraph-ai, hugegraph/hugegraph-ai]
+      publish:
+        description: Upload validated artifacts
+        required: true
+        type: boolean
+        default: false
       source_ref:
-        description: 'apache/hugegraph-ai branch, tag, or commit SHA'
+        description: 'Branch, tag, or commit SHA; resolved once before building'
         required: true
         default: main
         type: string
@@ -19,11 +36,20 @@ on:
         required: false
         type: string
 
+      test_client_version:
+        description: 'MCP TestPyPI only: client x.y.z.n; defaults to test_version'
+        required: false
+        type: string
+
 permissions:
   contents: read
 
 env:
   UV_VERSION: '0.12.18'
+  COMPONENT: ${{ inputs.component }}
+  SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+  UV_DEFAULT_INDEX: https://pypi.org/simple
+  UV_NO_CONFIG: 'true'
 
 jobs:
   build-check:
@@ -46,10 +72,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REF: ${{ inputs.source_ref }}
-        run: python .github/scripts/python_release.py resolve --source-ref "$SOURCE_REF"
+        run: python .github/scripts/python_release.py resolve --source-ref "$SOURCE_REF" --source-repository "$SOURCE_REPOSITORY"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: apache/hugegraph-ai
+          repository: ${{ inputs.source_repository }}
           ref: ${{ steps.resolve.outputs.source_sha }}
           path: source
           persist-credentials: false
@@ -65,17 +91,19 @@ jobs:
           TEST_VERSION: ${{ inputs.test_version }}
         run: |
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
-          python .github/scripts/python_release.py metadata --target "$TARGET" --test-version "$TEST_VERSION"
+          python .github/scripts/python_release.py metadata --target "$TARGET" --test-version "$TEST_VERSION" --component "$COMPONENT"
       - name: Build and check distributions
         id: manifest
         env:
           SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
           VERSION: ${{ steps.metadata.outputs.version }}
+          MODULE: ${{ steps.metadata.outputs.module }}
         run: |
-          uv build --no-sources source/hugegraph-python-client --out-dir dist
+          uv build --no-sources "source/$MODULE" --out-dir dist
           uvx --from twine==7.0.0 twine check --strict dist/*
-          python .github/scripts/python_release.py manifest --sha "$SOURCE_SHA" --version "$VERSION"
+          python .github/scripts/python_release.py manifest --sha "$SOURCE_SHA" --version "$VERSION" --component "$COMPONENT" --source-repository "$SOURCE_REPOSITORY"
       - name: Isolated wheel and sdist smoke and client tests
+        if: inputs.component == 'client'
         env:
           VERSION: ${{ steps.metadata.outputs.version }}
         run: |
@@ -94,12 +122,60 @@ jobs:
               )
             done
           done
+      - name: Resolve published TestPyPI client
+        if: inputs.component == 'mcp' && inputs.target == 'testpypi'
+        id: test-client
+        env:
+          TEST_CLIENT_VERSION: ${{ inputs.test_client_version || inputs.test_version }}
+        run: python .github/scripts/python_release.py test-client --version "$TEST_CLIENT_VERSION"
+      - name: Isolated MCP wheel, sdist and uvx smoke
+        if: inputs.component == 'mcp'
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+          CLIENT_REQUIREMENT: ${{ steps.test-client.outputs.client_requirement }}
+        run: |
+          client_args=()
+          uvx_args=()
+          if [ -n "$CLIENT_REQUIREMENT" ]; then
+            client_args=("$CLIENT_REQUIREMENT")
+            uvx_args=(--with "$CLIENT_REQUIREMENT")
+            echo 'Dependency check: pinned TestPyPI client wheel; all other dependencies from PyPI.'
+          else
+            echo 'Dependency check: all dependencies from public PyPI.'
+          fi
+          uv python install 3.10 3.11
+          for version in 3.10 3.11; do
+            for artifact in "$GITHUB_WORKSPACE"/dist/*.whl "$GITHUB_WORKSPACE"/dist/*.tar.gz; do
+              scratch=$(mktemp -d)
+              uv venv --python "$version" "$scratch/venv"
+              uv pip install --python "$scratch/venv/bin/python" "$artifact" "${client_args[@]}"
+              (
+                cd "$scratch"
+                "$scratch/venv/bin/python" -I -c 'import importlib.metadata as m, os; assert m.version("hugegraph-mcp") == os.environ["VERSION"]; print("Installed client:", m.version("hugegraph-python"))'
+                uv pip install --python "$scratch/venv/bin/python" 'pytest==8.4.2'
+                mkdir client-contracts
+                cp "$GITHUB_WORKSPACE/source/hugegraph-python-client/src/tests/api/test_vertex_id_format.py" \
+                  "$GITHUB_WORKSPACE/source/hugegraph-python-client/src/tests/api/test_schema_contract.py" \
+                  "$GITHUB_WORKSPACE/source/hugegraph-python-client/src/tests/test_distribution.py" client-contracts/
+                "$scratch/venv/bin/python" -I -m pytest --confcutdir="$scratch/client-contracts" client-contracts -v --tb=short
+                python "$GITHUB_WORKSPACE/source/hugegraph-mcp/tests/distribution_smoke.py" -- "$scratch/venv/bin/hugegraph-mcp"
+              )
+            done
+          done
+          scratch=$(mktemp -d)
+          (
+            cd "$scratch"
+            for artifact in "$GITHUB_WORKSPACE"/dist/*.whl; do
+              python "$GITHUB_WORKSPACE/source/hugegraph-mcp/tests/distribution_smoke.py" -- \
+                uvx --no-config --no-cache --index-url https://pypi.org/simple --from "$artifact" "${uvx_args[@]}" hugegraph-mcp
+            done
+          )
       - name: Verify artifacts unchanged after tests
         env:
           SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
           VERSION: ${{ steps.metadata.outputs.version }}
           MANIFEST_SHA: ${{ steps.manifest.outputs.manifest_sha }}
-        run: python .github/scripts/python_release.py verify --sha "$SOURCE_SHA" --version "$VERSION" --manifest-sha "$MANIFEST_SHA"
+        run: python .github/scripts/python_release.py verify --sha "$SOURCE_SHA" --version "$VERSION" --component "$COMPONENT" --source-repository "$SOURCE_REPOSITORY" --manifest-sha "$MANIFEST_SHA"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         id: upload
         with:
@@ -109,12 +185,13 @@ jobs:
           retention-days: 14
 
   publish:
+    if: inputs.publish
     needs: build-check
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: ${{ inputs.target }}
     concurrency:
-      group: python-publish-${{ inputs.target }}-${{ needs.build-check.outputs.version }}
+      group: python-publish-${{ inputs.component }}-${{ inputs.target }}-${{ needs.build-check.outputs.version }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,4 +219,4 @@ jobs:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           python .github/scripts/python_release.py publish --sha "$SOURCE_SHA" \
-            --version "$VERSION" --manifest-sha "$MANIFEST_SHA" --target "$TARGET"
+            --version "$VERSION" --component "$COMPONENT" --source-repository "$SOURCE_REPOSITORY" --manifest-sha "$MANIFEST_SHA" --target "$TARGET"

@@ -16,8 +16,11 @@ import zipfile
 from pathlib import Path
 
 SOURCE = "apache/hugegraph-ai"
-PACKAGE = "hugegraph-python"
-MODULE = "hugegraph-python-client"
+SOURCES = (SOURCE, "hugegraph/hugegraph-ai")
+COMPONENTS = {
+    "client": ("hugegraph-python", "hugegraph-python-client"),
+    "mcp": ("hugegraph-mcp", "hugegraph-mcp"),
+}
 TARGETS = {
     "testpypi": ("https://test.pypi.org/legacy/", "https://test.pypi.org"),
     "pypi": ("https://upload.pypi.org/legacy/", "https://pypi.org"),
@@ -40,22 +43,24 @@ def output(**values):
             stream.write(f"{key}={value}\n")
 
 
-def github(endpoint):
+def github(endpoint, repository=SOURCE):
     return json.loads(
-        subprocess.check_output(["gh", "api", f"repos/{SOURCE}/{endpoint}"])
+        subprocess.check_output(["gh", "api", f"repos/{repository}/{endpoint}"])
     )
 
 
-def resolve(ref):
+def resolve(ref, repository=SOURCE):
+    require(repository in SOURCES, "Unsupported source repository")
     require(bool(ref) and not any(c in ref for c in "\n\r"), "Invalid source ref")
-    sha = github("commits/" + urllib.parse.quote(ref, safe=""))["sha"]
+    sha = github("commits/" + urllib.parse.quote(ref, safe=""), repository)["sha"]
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "Invalid source SHA")
     output(source_sha=sha)
 
 
-def metadata(source, target, version):
-    project = tomllib.loads((source / MODULE / "pyproject.toml").read_text())["project"]
-    require(project["name"] == PACKAGE, f"Distribution name must be {PACKAGE}")
+def metadata(source, target, version, component="client"):
+    package, module = COMPONENTS[component]
+    project = tomllib.loads((source / module / "pyproject.toml").read_text())["project"]
+    require(project["name"] == package, f"Distribution name must be {package}")
     base = project["version"]
     number = r"(?:0|[1-9][0-9]*)"
     require(
@@ -79,13 +84,13 @@ def metadata(source, target, version):
                 "uv",
                 "version",
                 "--project",
-                str(source / MODULE),
+                str(source / module),
                 "--frozen",
                 version,
             ],
             check=True,
         )
-    output(version=version)
+    output(version=version, module=module, package=package)
 
 
 def artifact_metadata(path):
@@ -114,7 +119,8 @@ def artifact_metadata(path):
     return msg["Name"], msg["Version"]
 
 
-def inventory(dist, version):
+def inventory(dist, version, component="client"):
+    package, _ = COMPONENTS[component]
     # uv creates this hidden cache marker; upload-artifact omits hidden files.
     files = sorted(
         p for p in dist.iterdir() if p.name not in ("manifest.json", ".gitignore")
@@ -127,32 +133,36 @@ def inventory(dist, version):
         require(path.is_file() and not path.is_symlink(), "Expected regular artifact")
         require(
             re.fullmatch(
-                r"hugegraph_python-[A-Za-z0-9_.+!-]+\.(whl|tar\.gz)", path.name
+                re.escape(package.replace("-", "_"))
+                + r"-[A-Za-z0-9_.+!-]+\.(whl|tar\.gz)",
+                path.name,
             ),
             "Unexpected filename",
         )
         require(
-            artifact_metadata(path) == (PACKAGE, version), "Artifact metadata mismatch"
+            artifact_metadata(path) == (package, version), "Artifact metadata mismatch"
         )
         result[path.name] = digest(path)
     return result
 
 
-def manifest(dist, sha, version):
+def manifest(dist, sha, version, component="client", repository=SOURCE):
+    require(repository in SOURCES, "Unsupported source repository")
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "Invalid source SHA")
     data = {
-        "source": SOURCE,
+        "source": repository,
         "source_sha": sha,
-        "name": PACKAGE,
+        "name": COMPONENTS[component][0],
         "version": version,
-        "files": inventory(dist, version),
+        "files": inventory(dist, version, component),
     }
     path = dist / "manifest.json"
     path.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n")
     output(manifest_sha=digest(path))
 
 
-def verify(dist, sha, version, manifest_sha):
+def verify(dist, sha, version, manifest_sha, component="client", repository=SOURCE):
+    require(repository in SOURCES, "Unsupported source repository")
     path = dist / "manifest.json"
     require(path.is_file() and not path.is_symlink(), "Missing regular manifest")
     require(digest(path) == manifest_sha, "Manifest hash mismatch")
@@ -160,19 +170,20 @@ def verify(dist, sha, version, manifest_sha):
     require(
         data
         == {
-            "source": SOURCE,
+            "source": repository,
             "source_sha": sha,
-            "name": PACKAGE,
+            "name": COMPONENTS[component][0],
             "version": version,
-            "files": inventory(dist, version),
+            "files": inventory(dist, version, component),
         },
         "Manifest contents mismatch",
     )
     return data["files"]
 
 
-def remote_files(target, version):
-    url = f"{TARGETS[target][1]}/pypi/{PACKAGE}/{urllib.parse.quote(version, safe='')}/json"
+def remote_files(target, version, component="client"):
+    package, _ = COMPONENTS[component]
+    url = f"{TARGETS[target][1]}/pypi/{package}/{urllib.parse.quote(version, safe='')}/json"
     try:
         with urllib.request.urlopen(url, timeout=30) as response:
             data = json.load(response)
@@ -189,9 +200,44 @@ def remote_files(target, version):
     return result
 
 
-def publish(dist, sha, version, manifest_sha, target):
-    files = verify(dist, sha, version, manifest_sha)
-    remote = remote_files(target, version)
+def test_client(version):
+    """Pin one published TestPyPI client wheel without mixing package indexes."""
+    require(
+        re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){3}", version),
+        "Test client version must be x.y.z.n",
+    )
+    url = f"https://test.pypi.org/pypi/hugegraph-python/{version}/json"
+    with urllib.request.urlopen(url, timeout=30) as response:
+        data = json.load(response)
+    require(
+        data["info"]["name"] == "hugegraph-python"
+        and data["info"]["version"] == version,
+        "Test client metadata mismatch",
+    )
+    filename = f"hugegraph_python-{version}-py3-none-any.whl"
+    wheels = [item for item in data["urls"] if item["filename"] == filename]
+    require(len(wheels) == 1, "Expected one universal TestPyPI client wheel")
+    wheel = wheels[0]
+    sha = wheel["digests"]["sha256"]
+    require(re.fullmatch(r"[0-9a-f]{64}", sha), "Invalid TestPyPI client hash")
+    parsed = urllib.parse.urlsplit(wheel["url"])
+    require(
+        parsed.scheme == "https"
+        and parsed.netloc == "test-files.pythonhosted.org"
+        and parsed.path.endswith("/" + filename)
+        and not parsed.query
+        and not parsed.fragment,
+        "Unexpected TestPyPI client URL",
+    )
+    require(not wheel.get("yanked", False), "TestPyPI client wheel is yanked")
+    output(client_requirement=f"hugegraph-python @ {wheel['url']}#sha256={sha}")
+
+
+def publish(
+    dist, sha, version, manifest_sha, target, component="client", repository=SOURCE
+):
+    files = verify(dist, sha, version, manifest_sha, component, repository)
+    remote = remote_files(target, version, component)
     # Finish the entire preflight before starting uv, including partial retries.
     unexpected = sorted(remote.keys() - files.keys())
     require(not unexpected, f"Unexpected remote artifacts: {', '.join(unexpected)}")
@@ -225,10 +271,13 @@ def publish(dist, sha, version, manifest_sha, target):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("resolve", "metadata", "manifest", "verify", "publish")
+        "command",
+        choices=("resolve", "metadata", "manifest", "verify", "test-client", "publish"),
     )
     parser.add_argument("--target", choices=TARGETS, default="testpypi")
     parser.add_argument("--source-ref", default="main")
+    parser.add_argument("--source-repository", choices=SOURCES, default=SOURCE)
+    parser.add_argument("--component", choices=COMPONENTS, default="client")
     parser.add_argument("--source", type=Path, default=Path("source"))
     parser.add_argument("--dist", type=Path, default=Path("dist"))
     parser.add_argument("--sha", default="")
@@ -236,16 +285,35 @@ def main():
     parser.add_argument("--test-version", default="")
     parser.add_argument("--manifest-sha", default="")
     args = parser.parse_args()
-    if args.command == "resolve":
-        resolve(args.source_ref)
+    if args.command == "test-client":
+        test_client(args.version)
+    elif args.command == "resolve":
+        resolve(args.source_ref, args.source_repository)
     elif args.command == "metadata":
-        metadata(args.source, args.target, args.test_version)
+        metadata(args.source, args.target, args.test_version, args.component)
     elif args.command == "manifest":
-        manifest(args.dist, args.sha, args.version)
+        manifest(
+            args.dist, args.sha, args.version, args.component, args.source_repository
+        )
     elif args.command == "verify":
-        verify(args.dist, args.sha, args.version, args.manifest_sha)
+        verify(
+            args.dist,
+            args.sha,
+            args.version,
+            args.manifest_sha,
+            args.component,
+            args.source_repository,
+        )
     else:
-        publish(args.dist, args.sha, args.version, args.manifest_sha, args.target)
+        publish(
+            args.dist,
+            args.sha,
+            args.version,
+            args.manifest_sha,
+            args.target,
+            args.component,
+            args.source_repository,
+        )
 
 
 if __name__ == "__main__":
