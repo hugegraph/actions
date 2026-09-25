@@ -87,7 +87,7 @@ To rehearse uploads, first publish client with `target=testpypi`, `test_version=
 1. Select one source commit containing both packages' version and dependency changes (initially `1.7.1`).
 2. Run `component=client`, `target=pypi`, `publish=false` to validate the source version; then enable `publish=true` to publish the client.
 3. Once the client version is available on PyPI, repeat validation and publishing for `component=mcp` at the same source commit. MCP validation intentionally fails until its required client is publicly available.
-4. Outside any checkout, verify `uvx --no-config --no-cache --index-url https://pypi.org/simple hugegraph-mcp==1.7.1`, with the documented HugeGraph connection settings. Workflow smoke checks use a fixture; verify a real service separately.
+4. Outside any checkout, verify `uvx --no-config --no-cache --index-url https://pypi.org/simple hugegraph-mcp@1.7.1`, with the documented HugeGraph connection settings. Workflow smoke checks use a fixture; verify a real service separately.
 
 For `1.8.0`, update the package versions and MCP's client dependency lower bound in the AI repository, then repeat this order. Published versions are immutable. Use `target=testpypi` and an explicit four-part `test_version` to test uploads without occupying a PyPI version.
 
