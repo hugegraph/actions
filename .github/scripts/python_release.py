@@ -236,6 +236,10 @@ def test_client(version):
 def publish(
     dist, sha, version, manifest_sha, target, component="client", repository=SOURCE
 ):
+    require(
+        target != "pypi" or repository == SOURCE,
+        "PyPI publishing requires apache/hugegraph-ai source",
+    )
     files = verify(dist, sha, version, manifest_sha, component, repository)
     remote = remote_files(target, version, component)
     # Finish the entire preflight before starting uv, including partial retries.

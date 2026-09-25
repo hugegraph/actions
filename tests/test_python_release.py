@@ -289,12 +289,30 @@ class ReleaseTests(unittest.TestCase):
                 SHA,
                 "1.7.0",
                 checksum,
-                "pypi",
+                "testpypi",
                 "mcp",
                 "hugegraph/hugegraph-ai",
             )
-        remote.assert_called_once_with("pypi", "1.7.0", "mcp")
+        remote.assert_called_once_with("testpypi", "1.7.0", "mcp")
         self.assertIn(str(self.wheel.resolve()), upload.call_args.args[0])
+
+    def test_fork_source_cannot_publish_to_pypi(self):
+        with (
+            patch.object(release, "remote_files") as remote,
+            patch.object(release.subprocess, "run") as upload,
+            self.assertRaisesRegex(ValueError, "PyPI publishing requires apache"),
+        ):
+            release.publish(
+                self.dist,
+                SHA,
+                "1.7.0",
+                self.manifest_sha,
+                "pypi",
+                "client",
+                "hugegraph/hugegraph-ai",
+            )
+        remote.assert_not_called()
+        upload.assert_not_called()
 
     def test_mcp_remote_lookup_uses_mcp_project(self):
         with patch.object(
