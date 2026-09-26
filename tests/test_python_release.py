@@ -55,6 +55,33 @@ class ReleaseTests(unittest.TestCase):
             len(release.verify(self.dist, SHA, "1.7.0", self.manifest_sha)), 2
         )
 
+    def test_sdist_accepts_both_separators_with_strict_metadata(self):
+        for separator in ("-", "_"):
+            self.sdist = self.sdist.rename(
+                self.dist / f"hugegraph{separator}python-1.7.0.tar.gz"
+            )
+            self.artifacts()
+            with self.subTest(separator=separator):
+                self.assertIn(self.sdist.name, release.inventory(self.dist, "1.7.0"))
+                for name, version in (
+                    ("hugegraph-mcp", "1.7.0"),
+                    ("hugegraph-python", "1.8.0"),
+                ):
+                    self.artifacts(name, version)
+                    # Keep the wheel valid so the sdist metadata is what fails.
+                    with zipfile.ZipFile(self.wheel, "w") as archive:
+                        archive.writestr(
+                            "hugegraph_python-1.7.0.dist-info/METADATA",
+                            "Name: hugegraph-python\nVersion: 1.7.0\n",
+                        )
+                    with self.assertRaisesRegex(ValueError, "metadata mismatch"):
+                        release.inventory(self.dist, "1.7.0")
+
+    def test_wrong_sdist_filename_rejected_even_with_valid_metadata(self):
+        self.sdist.rename(self.dist / "hugegraph_mcp-1.7.0.tar.gz")
+        with self.assertRaisesRegex(ValueError, "Unexpected filename"):
+            release.inventory(self.dist, "1.7.0")
+
     def test_tampered_manifest_rejected_before_network(self):
         (self.dist / "manifest.json").write_text("{}")
         with (

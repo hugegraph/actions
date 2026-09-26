@@ -158,7 +158,7 @@ jobs:
                   "$GITHUB_WORKSPACE/source/hugegraph-python-client/src/tests/api/test_schema_contract.py" \
                   "$GITHUB_WORKSPACE/source/hugegraph-python-client/src/tests/test_distribution.py" client-contracts/
                 "$scratch/venv/bin/python" -I -m pytest --confcutdir="$scratch/client-contracts" client-contracts -v --tb=short
-                python "$GITHUB_WORKSPACE/source/hugegraph-mcp/tests/distribution_smoke.py" -- "$scratch/venv/bin/hugegraph-mcp"
+                "$scratch/venv/bin/python" -I "$GITHUB_WORKSPACE/source/hugegraph-mcp/tests/distribution_smoke.py" -- "$scratch/venv/bin/hugegraph-mcp"
               )
             done
           done
@@ -166,8 +166,8 @@ jobs:
           (
             cd "$scratch"
             for artifact in "$GITHUB_WORKSPACE"/dist/*.whl; do
-              python "$GITHUB_WORKSPACE/source/hugegraph-mcp/tests/distribution_smoke.py" -- \
-                uvx --no-config --no-cache --index-url https://pypi.org/simple --from "$artifact" "${uvx_args[@]}" hugegraph-mcp
+              python3.11 -I "$GITHUB_WORKSPACE/source/hugegraph-mcp/tests/distribution_smoke.py" -- \
+                uvx --python 3.11 --no-config --no-cache --index-url https://pypi.org/simple --from "$artifact" "${uvx_args[@]}" hugegraph-mcp
             done
           )
       - name: Verify artifacts unchanged after tests

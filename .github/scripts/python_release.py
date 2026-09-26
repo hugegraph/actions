@@ -131,10 +131,12 @@ def inventory(dist, version, component="client"):
     result = {}
     for path in files:
         require(path.is_file() and not path.is_symlink(), "Expected regular artifact")
+        name_pattern = re.escape(package.replace("-", "_"))
+        if path.name.endswith(".tar.gz"):
+            name_pattern = name_pattern.replace("_", "[-_]")
         require(
             re.fullmatch(
-                re.escape(package.replace("-", "_"))
-                + r"-[A-Za-z0-9_.+!-]+\.(whl|tar\.gz)",
+                name_pattern + r"-[A-Za-z0-9_.+!-]+\.(whl|tar\.gz)",
                 path.name,
             ),
             "Unexpected filename",
