@@ -77,6 +77,7 @@ jobs:
     needs: source
     if: inputs.component != 'mcp'
     uses: ./.github/workflows/_publish_python_reusable.yml
+    secrets: inherit
     with:
       component: client
       source_repository: ${{ inputs.source_repository }}
@@ -91,6 +92,7 @@ jobs:
       ${{ !cancelled() && needs.source.result == 'success' && inputs.component != 'client' &&
           (needs.client.result == 'success' || needs.client.result == 'skipped') }}
     uses: ./.github/workflows/_publish_python_reusable.yml
+    secrets: inherit
     with:
       component: mcp
       source_repository: ${{ inputs.source_repository }}
