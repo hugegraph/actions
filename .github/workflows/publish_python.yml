@@ -16,12 +16,12 @@ on:
         default: apache/hugegraph-ai
         options: [apache/hugegraph-ai, hugegraph/hugegraph-ai]
       publish:
-        description: Upload validated artifacts
+        description: Publish to selected registry (unchecked = test only)
         required: true
         type: boolean
         default: false
       source_ref:
-        description: 'Branch, tag, or commit SHA; resolved once before building'
+        description: 'Source branch, tag, or commit SHA'
         required: true
         default: main
         type: string
@@ -32,12 +32,7 @@ on:
         default: testpypi
         options: [testpypi, pypi]
       test_version:
-        description: 'Required for TestPyPI: x.y.z.n (e.g. 1.7.0.1). Leave empty for PyPI.'
-        required: false
-        type: string
-
-      test_client_version:
-        description: 'MCP TestPyPI only: client x.y.z.n; defaults to test_version'
+        description: 'Shared client/MCP TestPyPI version: x.y.z.n (e.g. 1.7.1.1). Leave empty for PyPI.'
         required: false
         type: string
 
@@ -126,8 +121,8 @@ jobs:
         if: inputs.component == 'mcp' && inputs.target == 'testpypi'
         id: test-client
         env:
-          TEST_CLIENT_VERSION: ${{ inputs.test_client_version || inputs.test_version }}
-        run: python .github/scripts/python_release.py test-client --version "$TEST_CLIENT_VERSION"
+          TEST_VERSION: ${{ inputs.test_version }}
+        run: python .github/scripts/python_release.py test-client --version "$TEST_VERSION"
       - name: Isolated MCP wheel, sdist and uvx smoke
         if: inputs.component == 'mcp'
         env:
