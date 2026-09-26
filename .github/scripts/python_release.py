@@ -113,15 +113,20 @@ def wait_client(target, version):
         "Invalid client version",
     )
     url = f"{TARGETS[target][1]}/pypi/hugegraph-python/{version}/json"
-    for attempt in range(12):
+    deadline = time.monotonic() + 300
+    reason = "registry has not returned both artifacts"
+    for attempt in range(60):
+        if time.monotonic() >= deadline:
+            break
         try:
             with urllib.request.urlopen(url, timeout=30) as response:
                 data = json.load(response)
         except urllib.error.HTTPError as error:
             if error.code not in (404, 429) and not 500 <= error.code < 600:
                 raise
-        except urllib.error.URLError:
-            pass
+            reason = f"registry returned HTTP {error.code}"
+        except urllib.error.URLError as error:
+            reason = f"registry connection failed: {error.reason}"
         else:
             require(
                 data["info"]["name"] == "hugegraph-python"
@@ -136,9 +141,14 @@ def wait_client(target, version):
             if {"bdist_wheel", "sdist"} <= types:
                 print(f"Client {version} is available on {target}.")
                 return
-        if attempt < 11:
-            time.sleep(5)
-    raise ValueError(f"Client {version} is not available on {target} after 12 attempts")
+            reason = "registry has not returned both artifacts"
+        remaining = deadline - time.monotonic()
+        if attempt < 59 and remaining > 0:
+            print(f"Waiting for client {version} on {target}: {reason}", flush=True)
+            time.sleep(min(5, remaining))
+    raise ValueError(
+        f"Client {version} is not available on {target} within 5 minutes: {reason}"
+    )
 
 
 def artifact_metadata(path):

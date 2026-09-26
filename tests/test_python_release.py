@@ -527,11 +527,26 @@ class ReleaseTests(unittest.TestCase):
                 side_effect=urllib.error.URLError("offline"),
             ) as request,
             patch.object(release.time, "sleep") as sleep,
-            self.assertRaisesRegex(ValueError, "after 12 attempts"),
+            self.assertRaisesRegex(ValueError, "within 5 minutes"),
         ):
             release.wait_client("testpypi", "1.7.1.2")
-        self.assertEqual(request.call_count, 12)
-        self.assertEqual(sleep.call_count, 11)
+        self.assertEqual(request.call_count, 60)
+        self.assertEqual(sleep.call_count, 59)
+
+    def test_wait_client_stops_at_deadline_without_another_request(self):
+        with (
+            patch.object(release.time, "monotonic", side_effect=[0, 0, 301, 301]),
+            patch.object(
+                release.urllib.request,
+                "urlopen",
+                side_effect=urllib.error.URLError("offline"),
+            ) as request,
+            patch.object(release.time, "sleep") as sleep,
+            self.assertRaisesRegex(ValueError, "within 5 minutes.*offline"),
+        ):
+            release.wait_client("testpypi", "1.7.1.2")
+        request.assert_called_once()
+        sleep.assert_not_called()
 
     def test_wait_client_rejects_permanent_errors_without_retry(self):
         responses = [
