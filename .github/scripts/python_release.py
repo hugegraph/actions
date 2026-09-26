@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tarfile
+import time
 import tomllib
 import urllib.error
 import urllib.parse
@@ -57,40 +58,87 @@ def resolve(ref, repository=SOURCE):
     output(source_sha=sha)
 
 
-def metadata(source, target, version, component="client"):
+def source_version(source, component):
     package, module = COMPONENTS[component]
     project = tomllib.loads((source / module / "pyproject.toml").read_text())["project"]
     require(project["name"] == package, f"Distribution name must be {package}")
     base = project["version"]
-    number = r"(?:0|[1-9][0-9]*)"
     require(
-        re.fullmatch(rf"{number}\.{number}\.{number}", base),
+        re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}", base),
         "Source version must be x.y.z",
     )
+    return base
+
+
+def release_version(base, target, version):
     if target == "pypi":
         require(not version, "test_version must be empty for PyPI")
-        version = base
-    else:
-        require(
-            re.fullmatch(rf"{number}\.{number}\.{number}\.{number}", version),
-            "TestPyPI requires test_version in x.y.z.n format",
-        )
-        require(
-            version.rsplit(".", 1)[0] == base,
-            "Test version must extend the source version",
-        )
+        return base
+    require(
+        re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){3}", version),
+        "TestPyPI requires test_version in x.y.z.n format",
+    )
+    require(
+        version.rsplit(".", 1)[0] == base,
+        "Test version must extend the source version",
+    )
+    return version
+
+
+def check_pair(source, target, version):
+    """Reject an inconsistent pair before either component can be uploaded."""
+    client = source_version(source, "client")
+    require(
+        client == source_version(source, "mcp"), "Client and MCP versions must match"
+    )
+    output(version=release_version(client, target, version))
+
+
+def metadata(source, target, version, component="client"):
+    package, module = COMPONENTS[component]
+    version = release_version(source_version(source, component), target, version)
+    if target == "testpypi":
         subprocess.run(
-            [
-                "uv",
-                "version",
-                "--project",
-                str(source / module),
-                "--frozen",
-                version,
-            ],
+            ["uv", "version", "--project", str(source / module), "--frozen", version],
             check=True,
         )
     output(version=version, module=module, package=package)
+
+
+def wait_client(target, version):
+    """Wait briefly for both published client artifacts to appear in the registry."""
+    parts = 3 if target == "testpypi" else 2
+    require(
+        re.fullmatch(rf"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){{{parts}}}", version),
+        "Invalid client version",
+    )
+    url = f"{TARGETS[target][1]}/pypi/hugegraph-python/{version}/json"
+    for attempt in range(12):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                data = json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code not in (404, 429) and not 500 <= error.code < 600:
+                raise
+        except urllib.error.URLError:
+            pass
+        else:
+            require(
+                data["info"]["name"] == "hugegraph-python"
+                and data["info"]["version"] == version,
+                "Published client metadata mismatch",
+            )
+            files = data["urls"]
+            require(
+                not any(item.get("yanked", False) for item in files), "Client is yanked"
+            )
+            types = {item["packagetype"] for item in files}
+            if {"bdist_wheel", "sdist"} <= types:
+                print(f"Client {version} is available on {target}.")
+                return
+        if attempt < 11:
+            time.sleep(5)
+    raise ValueError(f"Client {version} is not available on {target} after 12 attempts")
 
 
 def artifact_metadata(path):
@@ -278,7 +326,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("resolve", "metadata", "manifest", "verify", "test-client", "publish"),
+        choices=(
+            "resolve",
+            "check-pair",
+            "metadata",
+            "manifest",
+            "verify",
+            "test-client",
+            "wait-client",
+            "publish",
+        ),
     )
     parser.add_argument("--target", choices=TARGETS, default="testpypi")
     parser.add_argument("--source-ref", default="main")
@@ -291,7 +348,11 @@ def main():
     parser.add_argument("--test-version", default="")
     parser.add_argument("--manifest-sha", default="")
     args = parser.parse_args()
-    if args.command == "test-client":
+    if args.command == "check-pair":
+        check_pair(args.source, args.target, args.test_version)
+    elif args.command == "wait-client":
+        wait_client(args.target, args.version)
+    elif args.command == "test-client":
         test_client(args.version)
     elif args.command == "resolve":
         resolve(args.source_ref, args.source_repository)

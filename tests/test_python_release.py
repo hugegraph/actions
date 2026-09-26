@@ -437,6 +437,131 @@ class ReleaseTests(unittest.TestCase):
         ):
             release.resolve("main")
 
+    def pair_projects(self, client="1.7.1", mcp="1.7.1"):
+        for component, version in (("client", client), ("mcp", mcp)):
+            name, module = release.COMPONENTS[component]
+            directory = self.root / module
+            directory.mkdir(exist_ok=True)
+            (directory / "pyproject.toml").write_text(
+                f'[project]\nname="{name}"\nversion="{version}"\n'
+            )
+
+    def test_pair_preflight_does_not_modify_sources(self):
+        self.pair_projects()
+        before = {p: p.read_bytes() for p in self.root.glob("*/pyproject.toml")}
+        with patch.object(release.subprocess, "run") as update:
+            release.check_pair(self.root, "pypi", "")
+            release.check_pair(self.root, "testpypi", "1.7.1.2")
+        update.assert_not_called()
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        self.assertIn("version=1.7.1.2", (self.root / "output").read_text())
+
+    def test_pair_preflight_rejects_version_mismatch_and_invalid_test_version(self):
+        self.pair_projects(mcp="1.8.0")
+        with self.assertRaisesRegex(ValueError, "versions must match"):
+            release.check_pair(self.root, "pypi", "")
+        self.pair_projects()
+        for target, version in (("pypi", "1.7.1.2"), ("testpypi", "1.8.0.2")):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                release.check_pair(self.root, target, version)
+        project = self.root / "hugegraph-mcp/pyproject.toml"
+        project.write_text('[project]\nname="unexpected"\nversion="1.7.1"\n')
+        with self.assertRaisesRegex(ValueError, "Distribution name"):
+            release.check_pair(self.root, "pypi", "")
+
+    def client_response(
+        self, version="1.7.1", types=("bdist_wheel", "sdist"), **changes
+    ):
+        data = {
+            "info": {"name": "hugegraph-python", "version": version},
+            "urls": [{"packagetype": kind, "yanked": False} for kind in types],
+        }
+        data.update(changes)
+        return io.BytesIO(json.dumps(data).encode())
+
+    def test_wait_client_retries_transient_errors_and_partial_publication(self):
+        errors = [
+            urllib.error.HTTPError("url", code, "pending", {}, None)
+            for code in (404, 429, 503)
+        ]
+        with (
+            patch.object(
+                release.urllib.request,
+                "urlopen",
+                side_effect=[
+                    *errors,
+                    urllib.error.URLError("connection failed"),
+                    self.client_response(types=("sdist",)),
+                    self.client_response(),
+                ],
+            ) as request,
+            patch.object(release.time, "sleep") as sleep,
+        ):
+            release.wait_client("pypi", "1.7.1")
+        self.assertEqual(request.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+        request.assert_called_with(
+            "https://pypi.org/pypi/hugegraph-python/1.7.1/json", timeout=30
+        )
+
+    def test_wait_client_uses_exact_testpypi_version(self):
+        with (
+            patch.object(
+                release.urllib.request,
+                "urlopen",
+                return_value=self.client_response(version="1.7.1.2"),
+            ) as request,
+            patch.object(release.time, "sleep") as sleep,
+        ):
+            release.wait_client("testpypi", "1.7.1.2")
+        request.assert_called_once_with(
+            "https://test.pypi.org/pypi/hugegraph-python/1.7.1.2/json", timeout=30
+        )
+        sleep.assert_not_called()
+
+    def test_wait_client_is_bounded(self):
+        with (
+            patch.object(
+                release.urllib.request,
+                "urlopen",
+                side_effect=urllib.error.URLError("offline"),
+            ) as request,
+            patch.object(release.time, "sleep") as sleep,
+            self.assertRaisesRegex(ValueError, "after 12 attempts"),
+        ):
+            release.wait_client("testpypi", "1.7.1.2")
+        self.assertEqual(request.call_count, 12)
+        self.assertEqual(sleep.call_count, 11)
+
+    def test_wait_client_rejects_permanent_errors_without_retry(self):
+        responses = [
+            urllib.error.HTTPError("url", 403, "forbidden", {}, None),
+            self.client_response(version="1.8.0"),
+            self.client_response(info={"name": "other", "version": "1.7.1"}),
+            self.client_response(urls=[{"packagetype": "sdist", "yanked": True}]),
+            io.BytesIO(b"invalid JSON"),
+        ]
+        for response in responses:
+            with (
+                self.subTest(response=response),
+                patch.object(
+                    release.urllib.request, "urlopen", side_effect=[response]
+                ) as request,
+                patch.object(release.time, "sleep") as sleep,
+                self.assertRaises((ValueError, urllib.error.HTTPError)),
+            ):
+                release.wait_client("pypi", "1.7.1")
+            request.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_wait_client_rejects_invalid_version_before_network(self):
+        with (
+            patch.object(release.urllib.request, "urlopen") as request,
+            self.assertRaisesRegex(ValueError, "Invalid client version"),
+        ):
+            release.wait_client("pypi", "1.7.1.2")
+        request.assert_not_called()
+
     def test_metadata_guards_before_build(self):
         module = self.root / release.COMPONENTS["client"][1]
         module.mkdir()

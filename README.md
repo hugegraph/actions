@@ -46,11 +46,11 @@ Use `FROM --platform=$BUILDPLATFORM` for portable build stages so Maven/Node pac
 
 ## Python packages
 
-[`publish_python.yml`](.github/workflows/publish_python.yml) builds and validates `hugegraph-python` (client) or `hugegraph-mcp` (MCP), with opt-in publishing. Both use the same artifact verification and upload path.
+[`publish_python.yml`](.github/workflows/publish_python.yml) builds and validates the client and MCP in one run by default, with opt-in publishing. A thin dispatcher calls [one reusable component workflow](.github/workflows/_publish_python_reusable.yml) in order; both components share artifact verification and upload logic.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `component` | `client` | `client` → `hugegraph-python-client` / `hugegraph-python`; `mcp` → `hugegraph-mcp` |
+| `component` | `both` | `both` runs client then MCP; `client` or `mcp` runs one component |
 | `source_repository` | `apache/hugegraph-ai` | Choose the Apache repository or `hugegraph/hugegraph-ai` for pre-merge validation |
 | `publish` | `false` | Validate and retain artifacts; enable explicitly to upload |
 | `source_ref` | `main` | Branch, tag or SHA; resolved to an immutable commit |
@@ -61,32 +61,32 @@ Test versions use `x.y.z.n`, extending the source version with a fourth number o
 
 Fork sources (`hugegraph/hugegraph-ai`) can be validated with `publish=false` or published to TestPyPI. Public PyPI uploads require `apache/hugegraph-ai`; the publisher rejects fork sources before network access or uploading.
 
-Validation runs (`publish=false`) skip the publish job, so they do not request environment approval or receive an upload token. They still perform all build/install/smoke checks and retain artifacts.
+Validation runs (`publish=false`) skip upload jobs and their environment approvals/tokens. With `both`, MCP uses the client wheel built and tested in that same run, verified against its source SHA and manifest hash. This validates the package pair without requiring an existing client release; it is not a registry-install check. A single-component MCP run still requires a published client.
 
 Create environments `testpypi` and `pypi`, each containing `PYPI_API_TOKEN`. Restrict `pypi` deployments to the `master` branch of this repository and require maintainer approval with admin bypass disabled; `testpypi` allows branch validation. This restriction applies to the workflow branch, not the source package ref. Only the upload step receives the selected token. Each token must authorize the selected package; a token scoped only to `hugegraph-python` cannot publish `hugegraph-mcp`.
 
 ```mermaid
 flowchart LR
-    S[Source SHA] --> B[Build and test]
-    B --> A[Wheel + sdist + hash manifest]
-    A --> V[Validation complete]
-    A -->|publish=true| P[Verify and publish]
-    P --> T[TestPyPI · default]
-    P --> R[PyPI · source version + approval]
+    S[Resolve one source SHA and check paired versions] --> C[Build and test client]
+    C --> CP[Publish client and wait for registry visibility]
+    CP --> M[Build and test MCP with published client]
+    M --> MP[Publish MCP]
+    C -->|publish=false: verified client artifact| V[Test MCP without uploading]
 ```
 
 The build job uses uv, checks wheel/sdist with Twine, records their hashes, and runs isolated wheel/sdist installations on Python 3.10/3.11. Client releases run unit/contract tests against the installed package. MCP releases first run the source revision's client vertex-ID, schema and distribution contract tests against the downloaded client in each isolated environment; only the three test files are copied, with no client source or repository pytest configuration. They then run the source revision's `hugegraph-mcp/tests/distribution_smoke.py` against each installed console entry point and a fresh `uvx --from <wheel> hugegraph-mcp` process; it checks MCP initialization, tool discovery, inspect and query calls against an HTTP fixture without requiring a live HugeGraph server. It verifies the artifacts again after tests. The publish job checks the manifest and remote filenames/hashes before uploading those exact artifacts. Unexpected remote files or conflicting hashes fail; identical files are skipped. For partial uploads, **re-run failed jobs** to reuse the original artifacts.
 
 ### Client and MCP release order
 
-For `target=pypi`, all dependencies come from **public PyPI**. For MCP `target=testpypi`, the workflow fetches the exact published client wheel identified by the same `test_version` from TestPyPI, verifies its metadata and SHA-256, and installs it by a hash-pinned direct URL. All other dependencies still come from public PyPI; there is no mixed-index lookup or local client fallback. TestPyPI success verifies the test-channel pair, not public PyPI availability. The selected source must include the distribution smoke script for MCP validation.
+Choose `both` to resolve the source only once, check that client/MCP versions match, then complete the client workflow before starting MCP. A client failure stops the pair. When publishing, the client step waits for the exact version's wheel and sdist to appear in the selected registry before MCP starts. Single-component options remain available for focused validation or recovery.
 
-To rehearse uploads, first publish client with `target=testpypi`, `test_version=1.7.1.1`, then MCP with the same values. For another test version (e.g. `1.7.1.2`), publish the client with that version before testing or publishing MCP. Use `publish=false` for build/install validation before enabling uploads. A missing or yanked client wheel fails the MCP gate.
+For publication to `pypi`, MCP dependencies come from **public PyPI**; `both` pins the client to the version just published. For publication to `testpypi`, MCP uses the exact client wheel matching `test_version`, fetched through a hash-pinned direct URL. All other dependencies come from public PyPI, without mixed-index lookup. Validation-only `both` uses the same-run client artifact instead. These three paths are identified in the run logs.
 
-1. Select one source commit containing both packages' version and dependency changes (initially `1.7.1`).
-2. Run `component=client`, `target=pypi`, `publish=false` to validate the source version; then enable `publish=true` to publish the client.
-3. Once the client version is available on PyPI, repeat validation and publishing for `component=mcp` at the same source commit. MCP validation intentionally fails until its required client is publicly available.
-4. Outside any checkout, verify `uvx --no-config --no-cache --index-url https://pypi.org/simple hugegraph-mcp@1.7.1`, with the documented HugeGraph connection settings. Workflow smoke checks use a fixture; verify a real service separately.
+1. Select `component=both`, one source ref containing both packages, and the target index. For TestPyPI, supply one shared `test_version` such as `1.7.1.2`; leave it empty for PyPI.
+2. Leave `publish` unchecked to test both packages without uploading anything.
+3. Enable `publish` to run the client upload, registry visibility check, MCP validation and MCP upload in sequence. Environment approvals still apply to each upload job.
+4. If the client is published but MCP fails, re-run failed jobs to retain the original artifacts. A separate `mcp` run can also validate/release the same source version without rebuilding the client; do not rebuild already-published artifacts and expect to overwrite them.
+5. After public PyPI publication, verify `uvx --no-config --no-cache --index-url https://pypi.org/simple hugegraph-mcp@1.7.1` outside any checkout with the documented HugeGraph connection settings. Workflow smoke checks use an HTTP fixture; verify a real service separately.
 
 For `1.8.0`, update the package versions and MCP's client dependency lower bound in the AI repository, then repeat this order. Published versions are immutable. Use `target=testpypi` and an explicit four-part `test_version` to test uploads without occupying a PyPI version.
 
@@ -97,7 +97,7 @@ Local checks (no upload):
 
 ```bash
 uv run --no-project --python 3.11 python -m unittest discover -s tests -p 'test_python_release.py' -v
-actionlint .github/workflows/publish_python.yml
+actionlint .github/workflows/publish_python.yml .github/workflows/_publish_python_reusable.yml
 ```
 
 </details>
