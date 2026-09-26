@@ -76,30 +76,132 @@ jobs:
   client:
     needs: source
     if: inputs.component != 'mcp'
-    uses: ./.github/workflows/_publish_python_reusable.yml
-    secrets: inherit
+    uses: ./.github/workflows/_build_python_reusable.yml
     with:
       component: client
       source_repository: ${{ inputs.source_repository }}
       source_sha: ${{ needs.source.outputs.sha }}
       target: ${{ inputs.target }}
       test_version: ${{ inputs.test_version }}
-      publish: ${{ inputs.publish }}
 
   mcp:
     needs: [source, client]
     if: >-
       ${{ !cancelled() && needs.source.result == 'success' && inputs.component != 'client' &&
           (needs.client.result == 'success' || needs.client.result == 'skipped') }}
-    uses: ./.github/workflows/_publish_python_reusable.yml
-    secrets: inherit
+    uses: ./.github/workflows/_build_python_reusable.yml
     with:
       component: mcp
       source_repository: ${{ inputs.source_repository }}
       source_sha: ${{ needs.source.outputs.sha }}
       target: ${{ inputs.target }}
       test_version: ${{ inputs.test_version }}
-      publish: ${{ inputs.publish }}
       client_version: ${{ needs.client.outputs.version }}
-      client_artifact_id: ${{ !inputs.publish && needs.client.outputs.artifact_id || '' }}
-      client_manifest_sha: ${{ !inputs.publish && needs.client.outputs.manifest_sha || '' }}
+      client_artifact_id: ${{ needs.client.outputs.artifact_id }}
+      client_manifest_sha: ${{ needs.client.outputs.manifest_sha }}
+
+  publish:
+    needs: [source, client, mcp]
+    if: >-
+      ${{ inputs.publish && !cancelled() && needs.source.result == 'success' &&
+          (needs.client.result == 'success' || needs.client.result == 'skipped') &&
+          (needs.mcp.result == 'success' || needs.mcp.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: ${{ inputs.target }}
+    concurrency:
+      group: python-publish-${{ inputs.target }}-${{ needs.client.outputs.version || needs.mcp.outputs.version }}
+      cancel-in-progress: false
+    env:
+      UV_DEFAULT_INDEX: https://pypi.org/simple
+      UV_NO_CONFIG: 'true'
+      SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+      SOURCE_SHA: ${{ needs.source.outputs.sha }}
+      TARGET: ${{ inputs.target }}
+      CLIENT_VERSION: ${{ needs.client.outputs.version }}
+      MCP_VERSION: ${{ needs.mcp.outputs.version }}
+      CLIENT_MANIFEST_SHA: ${{ needs.client.outputs.manifest_sha }}
+      MCP_MANIFEST_SHA: ${{ needs.mcp.outputs.manifest_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.18'
+          enable-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.component != 'mcp'
+        with:
+          artifact-ids: ${{ needs.client.outputs.artifact_id }}
+          merge-multiple: true
+          path: dist/client
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.component != 'client'
+        with:
+          artifact-ids: ${{ needs.mcp.outputs.artifact_id }}
+          merge-multiple: true
+          path: dist/mcp
+      - name: Verify every selected artifact before uploading
+        env:
+          COMPONENT: ${{ inputs.component }}
+        run: |
+          if [ "$COMPONENT" != mcp ]; then
+            python .github/scripts/python_release.py verify --component client --dist dist/client \
+              --sha "$SOURCE_SHA" --version "$CLIENT_VERSION" --manifest-sha "$CLIENT_MANIFEST_SHA" \
+              --source-repository "$SOURCE_REPOSITORY"
+          fi
+          if [ "$COMPONENT" != client ]; then
+            python .github/scripts/python_release.py verify --component mcp --dist dist/mcp \
+              --sha "$SOURCE_SHA" --version "$MCP_VERSION" --manifest-sha "$MCP_MANIFEST_SHA" \
+              --source-repository "$SOURCE_REPOSITORY"
+          fi
+      - name: Publish client
+        if: inputs.component != 'mcp'
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python .github/scripts/python_release.py publish --component client --dist dist/client \
+            --sha "$SOURCE_SHA" --version "$CLIENT_VERSION" --manifest-sha "$CLIENT_MANIFEST_SHA" \
+            --source-repository "$SOURCE_REPOSITORY" --target "$TARGET"
+      - name: Wait for the published client
+        if: inputs.component != 'mcp'
+        run: python .github/scripts/python_release.py wait-client --target "$TARGET" --version "$CLIENT_VERSION"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.component != 'client'
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ needs.source.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - name: Select published client for MCP validation
+        if: inputs.component != 'client'
+        id: published-client
+        env:
+          TEST_VERSION: ${{ inputs.test_version }}
+        run: |
+          if [ "$TARGET" = testpypi ]; then
+            python .github/scripts/python_release.py test-client --version "$TEST_VERSION"
+          elif [ -n "$CLIENT_VERSION" ]; then
+            echo "client_requirement=hugegraph-python==$CLIENT_VERSION" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify MCP against the published client
+        if: inputs.component != 'client'
+        env:
+          VERSION: ${{ needs.mcp.outputs.version }}
+          CLIENT_REQUIREMENT: ${{ steps.published-client.outputs.client_requirement }}
+          SOURCE_DIR: ${{ github.workspace }}/source
+          DIST_DIR: ${{ github.workspace }}/dist/mcp
+        run: bash .github/scripts/check_mcp_distribution.sh
+      - name: Publish MCP
+        if: inputs.component != 'client'
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python .github/scripts/python_release.py publish --component mcp --dist dist/mcp \
+            --sha "$SOURCE_SHA" --version "$MCP_VERSION" --manifest-sha "$MCP_MANIFEST_SHA" \
+            --source-repository "$SOURCE_REPOSITORY" --target "$TARGET"
