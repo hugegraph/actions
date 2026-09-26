@@ -16,12 +16,12 @@ on:
         default: apache/hugegraph-ai
         options: [apache/hugegraph-ai, hugegraph/hugegraph-ai]
       publish:
-        description: Upload validated artifacts
+        description: Publish to selected registry (unchecked = test only)
         required: true
         type: boolean
         default: false
       source_ref:
-        description: 'Branch, tag, or commit SHA; resolved once before building'
+        description: 'Source branch, tag, or commit SHA'
         required: true
         default: main
         type: string
