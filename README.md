@@ -55,8 +55,7 @@ Use `FROM --platform=$BUILDPLATFORM` for portable build stages so Maven/Node pac
 | `publish` | `false` | Validate and retain artifacts; enable explicitly to upload |
 | `source_ref` | `main` | Branch, tag or SHA; resolved to an immutable commit |
 | `target` | `testpypi` | `testpypi` or `pypi`; both accept a source branch, tag or SHA |
-| `test_version` | Empty | Required for TestPyPI, e.g. `1.7.1.1`; must be empty for PyPI |
-| `test_client_version` | `test_version` | MCP TestPyPI only: exact published client test version, e.g. `1.7.1.1` |
+| `test_version` | Empty | Shared client/MCP version for TestPyPI, e.g. `1.7.1.1`; must be empty for PyPI |
 
 Test versions use `x.y.z.n`, extending the source version with a fourth number only in the CI checkout. Choose a new number when testing changed code; there is no automatic numbering. Production reads `x.y.z` directly from the selected source commit's metadata, with no version override or tag requirement. Four-part versions are a convention for TestPyPI, not Python prerelease markers.
 
@@ -80,9 +79,9 @@ The build job uses uv, checks wheel/sdist with Twine, records their hashes, and 
 
 ### Client and MCP release order
 
-For `target=pypi`, all dependencies come from **public PyPI**. For MCP `target=testpypi`, the workflow fetches the exact published client wheel identified by `test_client_version` (defaults to `test_version`) from TestPyPI, verifies its metadata and SHA-256, and installs it by a hash-pinned direct URL. All other dependencies still come from public PyPI; there is no mixed-index lookup or local client fallback. TestPyPI success verifies the test-channel pair, not public PyPI availability. The selected source must include the distribution smoke script for MCP validation.
+For `target=pypi`, all dependencies come from **public PyPI**. For MCP `target=testpypi`, the workflow fetches the exact published client wheel identified by the same `test_version` from TestPyPI, verifies its metadata and SHA-256, and installs it by a hash-pinned direct URL. All other dependencies still come from public PyPI; there is no mixed-index lookup or local client fallback. TestPyPI success verifies the test-channel pair, not public PyPI availability. The selected source must include the distribution smoke script for MCP validation.
 
-To rehearse uploads, first publish client with `target=testpypi`, `test_version=1.7.1.1`, then MCP with the same values. For a later MCP-only iteration (`1.7.1.2`), keep `test_client_version=1.7.1.1`. Use `publish=false` for build/install validation before enabling uploads. A missing or yanked client wheel fails the MCP gate.
+To rehearse uploads, first publish client with `target=testpypi`, `test_version=1.7.1.1`, then MCP with the same values. For another test version (e.g. `1.7.1.2`), publish the client with that version before testing or publishing MCP. Use `publish=false` for build/install validation before enabling uploads. A missing or yanked client wheel fails the MCP gate.
 
 1. Select one source commit containing both packages' version and dependency changes (initially `1.7.1`).
 2. Run `component=client`, `target=pypi`, `publish=false` to validate the source version; then enable `publish=true` to publish the client.
