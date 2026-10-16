@@ -1,6 +1,6 @@
 # HugeGraph Actions
 
-Shared workflows for publishing HugeGraph Docker images and Python packages, validating releases, and repository automation.
+Shared workflows for publishing HugeGraph Docker images, Helm charts and Python packages, validating releases, and repository automation.
 
 ## Image publishing architecture
 
@@ -17,7 +17,7 @@ Thin component wrappers call either [the standard image publisher](.github/workf
 | Latest | Scheduled or manual | Default source uses `latest`; other refs can derive a tag or use `image_tag` | Skipped only for the configured default source without an explicit tag |
 | Release | Manual | Explicit `source_ref`; standard images can derive the version, PD/Store/Server requires `image_tag=x.y.z` | Always runs |
 
-Manual latest runs default to validation (`publish=false`): build all configured platforms and read caches without pushing images, exporting caches, or updating `LAST_*_HASH`. Scheduled runs publish automatically. Set `publish=true` to publish manually; use an explicit `image_tag` for branch builds.
+Manual latest runs default to publishing (`publish=true`). Uncheck `publish` to build all configured platforms and read caches without pushing images, exporting caches, or updating `LAST_*_HASH`. Scheduled runs publish automatically. Use an explicit `image_tag` for branch builds.
 
 Use `source_repository` to select the component's Apache or HugeGraph repository and `source_ref` for a branch, tag or commit. The resolved source SHA and destination `image_tag` are independent.
 
@@ -43,6 +43,50 @@ The runner uses 1 PD + 1 Store + 1 Server, with 1 GiB each for PD/Store and 1.5 
 ### Multi-platform builds
 
 Use `FROM --platform=$BUILDPLATFORM` for portable build stages so Maven/Node packaging runs natively; leave runtime stages on the target platform. Native libraries, JNI/CGO and architecture-specific downloads need cross-compilation or native target runners plus runtime tests. See [Docker's build strategies](https://docs.docker.com/build/building/multi-platform/) and [platform arguments](https://docs.docker.com/reference/dockerfile/#automatic-platform-args-in-the-global-scope).
+
+## Helm charts
+
+[`publish_helm.yml`](.github/workflows/publish_helm.yml) manually packages and tests the HStore cluster chart from `apache/hugegraph` (HugeGraph 1.8.0 and later). It resolves the selected ref once, and defaults to publishing the same tested package to both public OCI registries:
+
+Pull requests touching the Helm pipeline also run validation on GitHub runners, with publication disabled. They use Apache master by default; during a paired source change, maintainers can set the non-secret repository variable `HELM_CI_SOURCE_REF` to its Apache PR ref (for example `refs/pull/123/head`) or commit. Remove the override once the source change is merged. Manual runs keep their explicit `source_ref` input.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `source_ref` | `master` | Apache HugeGraph branch, tag or commit containing `helm/hugegraph` with `Chart.name: hugegraph-helm` |
+| `channel` | `dev` | `dev` appends `-dev.<run_number>` to the source Chart version; `release` uses its unmodified version |
+| `publish` | `true` | Upload to both GHCR and Docker Hub after all checks pass; uncheck to validate and retain the package only |
+
+Chart versions are independent from application versions: Chart `0.2.1` can deploy HugeGraph `1.8.0`. Development packages, such as `0.2.0-dev.123`, may use `latest` images. Formal packages require a published, non-prerelease GitHub Release for `appVersion >= 1.8.0`, matching released PD/Store/Server image tags or pinned digests, and fixed images for all rendered containers. Hubble keeps its own version. Maintain formal versions and image references in the source repository; this workflow does not rewrite them. Formal source commits must already be in Apache master history; Chart fixes may use later master commits after the service release.
+
+Before first use, merge the source Chart rename (the directory stays `helm/hugegraph`) and this workflow. Create the public Docker Hub repository `hugegraph/hugegraph-helm`; existing `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` secrets must authorize writes there. GHCR uses the workflow's `GITHUB_TOKEN` with `packages: write`. If a GHCR package already exists, grant `hugegraph/actions` write access under **Manage Actions access**. Public source metadata and package access are separate settings.
+
+Each run performs lint, preset rendering, source packaging regressions and Helm unit tests, then installs the final `.tgz` into a disposable kind cluster with 1 PD, 1 Store and 1 Server. CI keeps PVCs enabled, disables Hubble, bounds main-container memory to 1/2/2 GiB, and checks readiness, mounted PVC writes, authentication and committed graph CRUD. Image tags are resolved once to digests for that run's installation. These are CI limits and a core-cluster smoke test, not production sizing or Hubble/HA coverage. A failed test blocks both publishers.
+
+Each registry publishes independently, but the run succeeds only after **both** authenticated and anonymous pulls match the original `.tgz` SHA256 and Chart metadata. Existing identical versions are skipped; conflicting bytes fail without overwriting. Authentication, rate limits and network errors never count as an absent version. Helm adds the Chart name to a push's parent path, so pushes target `oci://ghcr.io/hugegraph` and `oci://registry-1.docker.io/hugegraph`.
+
+GHCR initially creates private packages. After its first successful upload, an administrator must set the package to **Public**. The GHCR publish job will fail its anonymous check until that is done; then **re-run failed jobs**. The original tested bundle is retained for 30 days (subject to repository retention limits). Recovery downloads that exact artifact ID, verifies its manifest and package hashes, skips matching uploads and completes the missing verification. Do not re-run the entire workflow to rebuild an occupied version. If the original artifact expired or was deleted, recovery fails; dispatch a new development run, or publish a new source-maintained formal Chart version.
+
+Public CI should use GHCR by default; Docker Hub is the alternative distribution channel. These examples use an illustrative Chart version—select a version that has actually been published:
+
+```bash
+helm pull oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0
+helm install hugegraph oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0
+helm pull oci://registry-1.docker.io/hugegraph/hugegraph-helm --version 0.2.0
+# Development versions require an explicit prerelease version.
+helm pull oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0-dev.123
+```
+
+After the first anonymously accessible publication, register `oci://ghcr.io/hugegraph/hugegraph-helm` in Artifact Hub as the single Helm OCI source. Indexing does not automatically grant Verified Publisher or Official status. Those badges need their own metadata and ownership verification; see [Artifact Hub OCI registration](https://artifacthub.io/docs/topics/repositories/helm-charts/).
+
+For offline use, `helm pull` produces the portable `.tgz`; it can be installed directly or uploaded unchanged into an internal registry. Use `helm push hugegraph-helm-0.2.0.tgz oci://registry.example.com/charts` for OCI. HTTP repositories use their own upload mechanism and must maintain `index.yaml` (for static hosting, `helm repo index --merge`); native `helm push` does not upload HTTP repositories. The community does not need to operate an additional HTTP source. A complete offline installation also needs mirrored PD, Store, Server and optionally Hubble images, plus any custom helper images, Kubernetes and storage prerequisites. Override their registry references in installation values; the Chart archive does not contain container images.
+
+Local publication-helper checks (no upload):
+
+```bash
+python3 -m unittest discover -s tests -p 'test_helm_release.py' -v
+bash tests/test_publish_prepare.sh
+actionlint .github/workflows/publish_helm.yml .github/workflows/publish_latest_*.yml
+```
 
 ## Python packages
 
