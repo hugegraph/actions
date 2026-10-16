@@ -1,5 +1,6 @@
 """Exercise Helm publication failure boundaries without registries or credentials."""
 
+import copy
 import importlib.util
 import io
 import json
@@ -56,6 +57,33 @@ class ResolveTests(unittest.TestCase):
             github.assert_not_called()
             with self.assertRaisesRegex(ValueError, "Invalid source SHA"):
                 release.resolve("master")
+
+    def test_release_rejects_unmerged_source_before_checkout_or_source_tests(self):
+        with patch.object(release, "github", return_value={"sha": SHA}), \
+                patch.object(release, "master_ancestor", side_effect=ValueError("unmerged")) as ancestry, \
+                patch.object(release, "output") as output:
+            with self.assertRaisesRegex(ValueError, "unmerged"):
+                release.resolve("feature-branch", "release")
+            ancestry.assert_called_once_with(SHA)
+            output.assert_not_called()
+
+
+class PublicationGateTests(unittest.TestCase):
+    def setUp(self):
+        self.data = {"source_sha": SHA, "channel": "dev", "version": "0.2.0-dev.123"}
+
+    def test_source_channel_and_dev_run_are_bound_to_trusted_inputs(self):
+        release.publication_gate(self.data, SHA, "dev", "123", "0.2.0-dev.123")
+        for overrides in ({"source_sha": "c" * 40}, {"channel": "release"}, {"version": "0.2.0"},
+                          {"version": "0.2.0-dev.124"}):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                release.publication_gate(dict(self.data, **overrides), SHA, "dev", "123", "0.2.0-dev.123")
+
+    def test_release_rechecks_ancestry_and_published_service_in_clean_publisher(self):
+        self.data.update(channel="release", version="0.2.0", app_version="1.8.0")
+        with patch.object(release, "release_gate") as gate:
+            release.publication_gate(self.data, SHA, "release", "123", "0.2.0")
+            gate.assert_called_once_with({"appVersion": "1.8.0"}, SHA)
 
 
 class AncestryTests(unittest.TestCase):
@@ -194,7 +222,8 @@ class BundleTests(unittest.TestCase):
                        for component in ("pd", "store", "server", "hubble")}
         self.write_source()
         self.env = patch.dict(os.environ, {"GITHUB_OUTPUT": str(self.root / "output"),
-                                          "HELM_REGISTRY_USERNAME": "user", "HELM_REGISTRY_PASSWORD": "secret"})
+                                          "GHCR_USERNAME": "user", "GHCR_PASSWORD": "secret",
+                                          "DOCKERHUB_USERNAME": "user", "DOCKERHUB_PASSWORD": "secret"})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.commands = []
@@ -223,12 +252,24 @@ class BundleTests(unittest.TestCase):
         if args[0] == "git":
             return "" if "ls-files" in args else SHA + "\n"
         if args[:2] == ["helm", "template"]:
-            return yaml.safe_dump({"kind": "Pod", "spec": {"containers": [{"image": "hugegraph/server:1.8.0"}]}})
+            values = copy.deepcopy(self.values)
+            if "-f" in args:
+                overrides = yaml.safe_load(Path(args[-1]).read_text())
+                for component, override in overrides.items():
+                    values[component]["image"].update(override["image"])
+                    if "waitImage" in override:
+                        values[component]["waitImage"] = override["waitImage"]
+            images = list(release.component_images(values, self.metadata["appVersion"]).values())
+            images += list(release.helper_images(values).values())
+            images += getattr(self, "extra_images", [])
+            return yaml.safe_dump({"kind": "Pod", "spec": {"containers": [{"image": image} for image in images]}})
         raise AssertionError(args)
 
     def helm_run(self, args, **kwargs):
         self.commands.append((args, kwargs))
-        if args[:2] == ["helm", "package"]:
+        if args[:3] == ["helm", "registry", "login"]:
+            Path(kwargs["env"]["HELM_REGISTRY_CONFIG"]).write_text(json.dumps({"auths": {args[3]: {}}}))
+        elif args[:2] == ["helm", "package"]:
             metadata = yaml.safe_load((Path(args[2]) / "Chart.yaml").read_text())
             archive(Path(args[-1]) / f"hugegraph-helm-{metadata['version']}.tgz", metadata)
         elif args[:2] == ["helm", "pull"]:
@@ -239,6 +280,9 @@ class BundleTests(unittest.TestCase):
     def build(self, channel="dev"):
         release.package(self.source, SHA, "master", channel, "123", self.dist)
         return release.digest(self.dist / "manifest.json")
+
+    def publish(self, manifest_sha):
+        release.publish(self.dist, manifest_sha, SHA, "dev", "123", "0.2.0-dev.123")
 
     def seal(self):
         manifest_sha = self.build()
@@ -265,6 +309,25 @@ class BundleTests(unittest.TestCase):
         for component in self.values.values():
             component["image"]["tag"] = "latest"
         self.write_source()
+        self.build()
+
+    def test_independent_init_and_hook_images_are_pinned(self):
+        self.values["store"]["waitImage"] = "busybox:1.36.1"
+        self.values["server"]["waitImage"] = "docker.io/library/alpine:3.20.0"
+        self.write_source()
+        self.build()
+        overrides = yaml.safe_load((self.dist / "image-values.yaml").read_text())
+        self.assertEqual(overrides["store"]["waitImage"], "registry-1.docker.io/library/busybox@" + DIGEST)
+        self.assertEqual(overrides["server"]["waitImage"], "registry-1.docker.io/library/alpine@" + DIGEST)
+
+    def test_unknown_unpinnable_rendered_image_is_rejected(self):
+        self.extra_images = ["busybox:1.36.1"]
+        with self.assertRaisesRegex(ValueError, "cannot be pinned"):
+            self.build()
+        self.assertFalse((self.dist / "manifest.json").exists())
+
+    def test_extra_image_already_using_a_digest_is_accepted(self):
+        self.extra_images = ["busybox@" + DIGEST]
         self.build()
 
     def test_release_preserves_source_and_requires_published_service(self):
@@ -327,7 +390,7 @@ class BundleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "published stable"):
                     self.build("release")
 
-    def test_release_rejects_mutable_images_and_wrong_service_version(self):
+    def test_release_rejects_latest_images_and_wrong_service_version(self):
         for component, tag in (("pd", "latest"), ("server", "1.9.0"), ("hubble", "latest")):
             original = self.values[component]["image"]["tag"]
             self.values[component]["image"]["tag"] = tag
@@ -391,7 +454,7 @@ class BundleTests(unittest.TestCase):
         manifest_sha = self.seal()
         next(self.dist.glob("*.tgz")).unlink()
         with self.assertRaisesRegex(ValueError, "Package hash mismatch"):
-            release.publish(self.dist, manifest_sha, "ghcr")
+            self.publish(manifest_sha)
         self.assertFalse(any(args[:3] == ["helm", "registry", "login"] for args, _ in self.commands))
 
     def test_modified_or_extra_bundle_files_fail_before_login(self):
@@ -401,7 +464,7 @@ class BundleTests(unittest.TestCase):
             original = path.read_bytes() if path.exists() else None
             path.write_text("changed")
             with self.subTest(name=name), self.assertRaises(ValueError):
-                release.publish(self.dist, manifest_sha, "ghcr")
+                self.publish(manifest_sha)
             if original is None:
                 path.unlink()
             else:
@@ -411,16 +474,19 @@ class BundleTests(unittest.TestCase):
     def test_first_publish_verifies_authenticated_and_anonymous_downloads(self):
         manifest_sha = self.seal()
         with patch.object(release, "registry_manifest", return_value=None) as probe:
-            release.publish(self.dist, manifest_sha, "dockerhub")
-            probe.assert_called_once_with("registry-1.docker.io", "hugegraph/hugegraph-helm",
-                "0.2.0-dev.123", ("user", "secret"), actions="pull,push")
+            self.publish(manifest_sha)
+            self.assertEqual(probe.call_count, 2)
+            for host in ("ghcr.io", "registry-1.docker.io"):
+                probe.assert_any_call(host, "hugegraph/hugegraph-helm",
+                    "0.2.0-dev.123", ("user", "secret"), actions="pull,push")
         pushes = [args for args, _ in self.commands if args[:2] == ["helm", "push"]]
-        self.assertEqual(len(pushes), 1)
-        self.assertEqual(pushes[0][-1], "oci://registry-1.docker.io/hugegraph")
+        self.assertEqual(len(pushes), 2)
+        self.assertEqual({p[-1] for p in pushes}, {"oci://ghcr.io/hugegraph", "oci://registry-1.docker.io/hugegraph"})
         pulls = [kwargs for args, kwargs in self.commands if args[:2] == ["helm", "pull"]]
-        self.assertEqual(len(pulls), 2)
-        self.assertIn("HELM_REGISTRY_PASSWORD", pulls[0]["env"])
-        self.assertNotIn("HELM_REGISTRY_PASSWORD", pulls[1]["env"])
+        self.assertEqual(len(pulls), 4)
+        for pull in pulls:
+            self.assertNotIn("GHCR_PASSWORD", pull["env"])
+            self.assertNotIn("DOCKERHUB_PASSWORD", pull["env"])
         self.assertNotEqual(pulls[0]["env"]["HELM_REGISTRY_CONFIG"], pulls[1]["env"]["HELM_REGISTRY_CONFIG"])
         login = next(kwargs for args, kwargs in self.commands if args[:3] == ["helm", "registry", "login"])
         self.assertEqual(login["input"], "secret\n")
@@ -428,9 +494,9 @@ class BundleTests(unittest.TestCase):
 
     def test_existing_identical_version_skips_push_and_still_checks_anonymous(self):
         manifest_sha = self.seal()
-        release.publish(self.dist, manifest_sha, "ghcr")
+        self.publish(manifest_sha)
         self.assertFalse(any(args[:2] == ["helm", "push"] for args, _ in self.commands))
-        self.assertEqual(sum(args[:2] == ["helm", "pull"] for args, _ in self.commands), 2)
+        self.assertEqual(sum(args[:2] == ["helm", "pull"] for args, _ in self.commands), 6)
 
     def test_existing_different_package_fails_without_overwrite(self):
         manifest_sha = self.seal()
@@ -441,18 +507,89 @@ class BundleTests(unittest.TestCase):
                 self.helm_run(args, **kwargs)
         with patch.object(release.subprocess, "run", side_effect=replace_pull):
             with self.assertRaisesRegex(ValueError, "refusing overwrite"):
-                release.publish(self.dist, manifest_sha, "ghcr")
+                self.publish(manifest_sha)
         self.assertFalse(any(args[:2] == ["helm", "push"] for args, _ in self.commands))
+
+    def test_second_registry_conflict_blocks_first_registry_write(self):
+        manifest_sha = self.seal()
+        def conflict(args, **kwargs):
+            if args[:2] == ["helm", "pull"]:
+                (Path(args[-1]) / next(self.dist.glob("*.tgz")).name).write_text("another run's bytes")
+            else:
+                return self.helm_run(args, **kwargs)
+        for states in ((None, DIGEST), (DIGEST, None)):
+            self.commands.clear()
+            with self.subTest(states=states), patch.object(release, "registry_manifest", side_effect=states), \
+                    patch.object(release.subprocess, "run", side_effect=conflict):
+                with self.assertRaisesRegex(ValueError, "refusing overwrite"):
+                    self.publish(manifest_sha)
+            self.assertFalse(any(args[:2] == ["helm", "push"] for args, _ in self.commands))
+
+    def test_network_failure_in_second_preflight_blocks_all_writes(self):
+        manifest_sha = self.seal()
+        with patch.object(release, "registry_manifest", side_effect=[None, urllib.error.URLError("offline")]):
+            with self.assertRaises(urllib.error.URLError):
+                self.publish(manifest_sha)
+        self.assertFalse(any(args[:2] == ["helm", "push"] for args, _ in self.commands))
+
+    def test_partial_publication_recovers_only_missing_registry_with_original_bytes(self):
+        manifest_sha = self.seal()
+        with patch.object(release, "registry_manifest", side_effect=[DIGEST, None]):
+            self.publish(manifest_sha)
+        pushes = [args for args, _ in self.commands if args[:2] == ["helm", "push"]]
+        self.assertEqual([p[-1] for p in pushes], ["oci://registry-1.docker.io/hugegraph"])
+
+    def test_both_registry_preflights_finish_before_first_push(self):
+        manifest_sha = self.seal()
+        probes = []
+        def probe(host, *args, **kwargs):
+            probes.append(host)
+            return None
+        def run(args, **kwargs):
+            if args[:2] == ["helm", "push"]:
+                self.assertEqual(probes, ["ghcr.io", "registry-1.docker.io"])
+            return self.helm_run(args, **kwargs)
+        with patch.object(release, "registry_manifest", side_effect=probe), \
+                patch.object(release.subprocess, "run", side_effect=run):
+            self.publish(manifest_sha)
+
+    def test_failed_second_push_then_retry_keeps_first_registry_original_package(self):
+        manifest_sha = self.seal()
+        original_sha = release.digest(next(self.dist.glob("*.tgz")))
+        published = set()
+        fail_dockerhub = True
+        def probe(host, *args, **kwargs):
+            return DIGEST if host in published else None
+        def run(args, **kwargs):
+            if args[:2] == ["helm", "push"]:
+                host = args[-1].removeprefix("oci://").split("/")[0]
+                if host == "registry-1.docker.io" and fail_dockerhub:
+                    raise subprocess.CalledProcessError(1, args)
+                published.add(host)
+            return self.helm_run(args, **kwargs)
+        with patch.object(release, "registry_manifest", side_effect=probe), \
+                patch.object(release.subprocess, "run", side_effect=run):
+            with self.assertRaisesRegex(ValueError, "Publication incomplete"):
+                self.publish(manifest_sha)
+            self.assertEqual(published, {"ghcr.io"})
+            fail_dockerhub = False
+            self.commands.clear()
+            self.publish(manifest_sha)
+        self.assertEqual(published, {"ghcr.io", "registry-1.docker.io"})
+        pushes = [args for args, _ in self.commands if args[:2] == ["helm", "push"]]
+        self.assertEqual([p[-1] for p in pushes], ["oci://registry-1.docker.io/hugegraph"])
+        self.assertEqual(release.digest(next(self.dist.glob("*.tgz"))), original_sha)
 
     def test_private_package_fails_anonymous_verification(self):
         manifest_sha = self.seal()
         def private_pull(args, **kwargs):
-            if args[:2] == ["helm", "pull"] and "HELM_REGISTRY_PASSWORD" not in kwargs["env"]:
+            if args[:2] == ["helm", "pull"] and not json.loads(
+                    Path(kwargs["env"]["HELM_REGISTRY_CONFIG"]).read_text())["auths"]:
                 raise subprocess.CalledProcessError(1, args)
             return self.helm_run(args, **kwargs)
         with patch.object(release.subprocess, "run", side_effect=private_pull):
-            with self.assertRaises(subprocess.CalledProcessError):
-                release.publish(self.dist, manifest_sha, "ghcr")
+            with self.assertRaisesRegex(ValueError, "Publication incomplete"):
+                self.publish(manifest_sha)
 
 
 if __name__ == "__main__":

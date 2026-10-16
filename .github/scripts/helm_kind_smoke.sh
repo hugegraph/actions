@@ -199,10 +199,24 @@ for component in ('pd', 'store', 'server'):
                                 for c in core[0]['status']['conditions']), component + ' lost readiness'
 images = []
 for pod in pods:
-    statuses = {c['name']: c for c in pod['status'].get('containerStatuses', [])}
-    for container in pod['spec']['containers']:
+    statuses = {c['name']: c for field in ('containerStatuses', 'initContainerStatuses', 'ephemeralContainerStatuses')
+                for c in pod['status'].get(field, [])}
+    for container in [c for field in ('containers', 'initContainers', 'ephemeralContainers')
+                      for c in pod['spec'].get(field, [])]:
         status = statuses.get(container['name'], {})
         assert status.get('imageID'), 'Missing runtime imageID for ' + pod['metadata']['name']
+        image = container['image']
+        assert '@sha256:' in image, 'Runtime container image must be pinned: ' + image
+        # Canonicalize Docker Hub shorthand before comparing with the sealed set.
+        repository, image_digest = image.rsplit('@', 1)
+        first = repository.split('/')[0]
+        if '/' not in repository:
+            repository = 'registry-1.docker.io/library/' + repository
+        elif not ('.' in first or ':' in first or first == 'localhost'):
+            repository = 'registry-1.docker.io/' + repository
+        elif first in ('docker.io', 'index.docker.io'):
+            repository = 'registry-1.docker.io/' + repository.split('/', 1)[1]
+        assert repository + '@' + image_digest in manifest['pinned_images'], 'Unexpected runtime image: ' + image
         images.append({'pod': pod['metadata']['name'], 'container': container['name'],
                        'image': container['image'], 'imageID': status.get('imageID', '')})
 pathlib.Path(target).write_text(json.dumps({'status': 'passed',

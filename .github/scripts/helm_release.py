@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -58,10 +59,13 @@ def github(endpoint):
     return json.loads(subprocess.check_output(["gh", "api", f"repos/{SOURCE}/{endpoint}"]))
 
 
-def resolve(ref):
+def resolve(ref, channel="dev"):
     require(bool(ref) and not any(c in ref for c in "\n\r"), "Invalid source ref")
     sha = github("commits/" + urllib.parse.quote(ref, safe=""))["sha"]
     require(isinstance(sha, str) and re.fullmatch(SHA, sha), "Invalid source SHA")
+    # This job runs only trusted pipeline code, before any selected-source tests.
+    if channel == "release":
+        master_ancestor(sha)
     output(source_sha=sha)
     return sha
 
@@ -224,20 +228,34 @@ def rendered_images(documents):
     return sorted(result)
 
 
+def registry_image(reference, registry):
+    first = reference.split("/", 1)[0]
+    qualified = "/" in reference and ("." in first or ":" in first or first == "localhost")
+    return registry + "/" + reference if registry and not qualified else reference
+
+
 def component_images(values, app_version):
     images = {}
     registry = values.get("global", {}).get("imageRegistry", "").rstrip("/")
     for component in ("pd", "store", "server", "hubble"):
         image = values[component]["image"]
         repository = image["repository"]
-        first = repository.split("/", 1)[0]
-        qualified = "/" in repository and ("." in first or ":" in first or first == "localhost")
-        if registry and not qualified:
-            repository = registry + "/" + repository
+        repository = registry_image(repository, registry)
         tag = str(image.get("tag") or app_version)
         reference = repository + ("@" + image["digest"] if image.get("digest") else ":" + tag)
         images[component] = reference
     return images
+
+
+def helper_images(values):
+    registry = values.get("global", {}).get("imageRegistry", "").rstrip("/")
+    return {component: registry_image(values[component]["waitImage"], registry)
+            for component in ("store", "server") if values[component].get("waitImage")}
+
+
+def pinned_image(image, image_digest):
+    host, repository, _ = split_image(image)
+    return f"{host}/{repository}@{image_digest}"
 
 
 def configured_images(values, app_version):
@@ -302,7 +320,8 @@ def package(source, sha, ref, channel, run_number, dist):
     components = component_images(values, str(chart.get("appVersion", "")))
     if channel == "release":
         configured_images(values, chart["appVersion"])
-    images = sorted(set(images + list(components.values())))
+    helpers = helper_images(values)
+    images = sorted(set(images + list(components.values()) + list(helpers.values())))
     checked_images = {}
     for image in images:
         if channel == "release":
@@ -312,13 +331,22 @@ def package(source, sha, ref, channel, run_number, dist):
         checked_images[image] = image_digest
     image_values = {component: {"image": {"digest": checked_images[image]}}
                     for component, image in components.items()}
+    for component, image in helpers.items():
+        image_values[component]["waitImage"] = pinned_image(image, checked_images[image])
     (dist / "image-values.yaml").write_text(yaml.safe_dump(image_values, sort_keys=True))
+    pinned_rendered = subprocess.check_output([
+        "helm", "template", "helm-audit", str(artifact), "-f", str(dist / "image-values.yaml")], text=True)
+    pinned_images = rendered_images(yaml.safe_load_all(pinned_rendered))
+    expected_pins = {pinned_image(image, value) for image, value in checked_images.items()}
+    require(all("@" in image and pinned_image(image, split_image(image)[2]) in expected_pins
+                for image in pinned_images), "Rendered image cannot be pinned by supported image values")
     data = {
         "schema": 1, "source": SOURCE, "source_ref": ref, "source_sha": sha,
         "channel": channel, "name": NAME, "version": version,
         "app_version": str(chart.get("appVersion", "")),
         "package": artifact.name, "package_sha256": digest(artifact),
         "images": images, "image_digests": checked_images,
+        "pinned_images": sorted(expected_pins),
         "image_values_sha256": digest(dist / "image-values.yaml"),
     }
     write_json(dist / "manifest.json", data)
@@ -382,16 +410,18 @@ def seal(dist, manifest_sha, validation):
     output(manifest_sha=digest(dist / "manifest.json"))
 
 
-def helm_environment(directory, anonymous=False):
+def helm_environment(directory):
     env = os.environ.copy()
     env["HELM_REGISTRY_CONFIG"] = str(directory / "registry.json")
     env["DOCKER_CONFIG"] = str(directory / "docker")
     Path(env["DOCKER_CONFIG"]).mkdir()
     Path(env["HELM_REGISTRY_CONFIG"]).write_text('{"auths": {}}')
     (Path(env["DOCKER_CONFIG"]) / "config.json").write_text('{"auths": {}}')
-    if anonymous:
-        for key in ("HELM_REGISTRY_USERNAME", "HELM_REGISTRY_PASSWORD", "GITHUB_TOKEN", "GH_TOKEN"):
-            env.pop(key, None)
+    # Login receives only its own password through stdin. Helm never inherits
+    # either registry's credentials (or the GitHub API token) as environment data.
+    for key in ("GHCR_USERNAME", "GHCR_PASSWORD", "DOCKERHUB_USERNAME", "DOCKERHUB_PASSWORD",
+                "GITHUB_TOKEN", "GH_TOKEN"):
+        env.pop(key, None)
     return env
 
 
@@ -407,29 +437,57 @@ def pull_compare(uri, data, artifact, env):
                 "Pulled chart metadata mismatch")
 
 
-def publish(dist, manifest_sha, target):
+def publication_gate(data, source_sha, channel, run_number, version):
+    """Bind the unprivileged validation bundle to trusted dispatch/source job inputs."""
+    require(re.fullmatch(SHA, source_sha) and data["source_sha"] == source_sha,
+            "Publication source does not match trusted source resolution")
+    require(data["channel"] == channel, "Publication channel does not match dispatch")
+    require(data["version"] == version, "Publication version does not match the workflow concurrency lock")
+    if channel == "dev":
+        require(re.fullmatch(r"[1-9][0-9]*", str(run_number)) and
+                data["version"].endswith("-dev." + str(run_number)),
+                "Development version must belong to this workflow run")
+    else:
+        release_gate({"appVersion": data["app_version"]}, source_sha)
+
+
+def publish(dist, manifest_sha, source_sha, channel, run_number, version):
     data, artifact = verify(dist, manifest_sha)
-    host, namespace = TARGETS[target]
-    username, password = os.environ.get("HELM_REGISTRY_USERNAME", ""), os.environ.get("HELM_REGISTRY_PASSWORD", "")
-    require(username and password, "Registry username and password are required")
-    parent = f"oci://{host}/{namespace}"
-    uri = parent + "/" + NAME
-    with tempfile.TemporaryDirectory() as temporary:
-        config = Path(temporary)
-        env = helm_environment(config)
-        subprocess.run(["helm", "registry", "login", host, "--username", username,
-                        "--password-stdin"], input=password + "\n", text=True, env=env, check=True)
-        existing = registry_manifest(host, namespace + "/" + NAME,
-                                     data["version"], (username, password), actions="pull,push")
-        if existing is None:
-            subprocess.run(["helm", "push", str(artifact), parent], env=env, check=True)
-        else:
-            print(f"{target}: existing version found; comparing original package bytes")
-        pull_compare(uri, data, artifact, env)
-    with tempfile.TemporaryDirectory() as temporary:
-        env = helm_environment(Path(temporary), anonymous=True)
-        pull_compare(uri, data, artifact, env)
-    print(f"{target}: anonymously verified {uri}:{data['version']} sha256:{data['package_sha256']}")
+    publication_gate(data, source_sha, channel, run_number, version)
+    # The workflow holds ONE chart-version lock for this entire operation.
+    # Inspect both registries before either write, including existing package bytes.
+    with ExitStack() as stack:
+        plans = []
+        for target, (host, namespace) in TARGETS.items():
+            username = os.environ.get(target.upper() + "_USERNAME", "")
+            password = os.environ.get(target.upper() + "_PASSWORD", "")
+            require(username and password, f"{target}: registry username and password are required")
+            config = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+            env = helm_environment(config)
+            subprocess.run(["helm", "registry", "login", host, "--username", username,
+                            "--password-stdin"], input=password + "\n", text=True, env=env, check=True)
+            parent = f"oci://{host}/{namespace}"
+            uri = parent + "/" + NAME
+            existing = registry_manifest(host, namespace + "/" + NAME,
+                                         data["version"], (username, password), actions="pull,push")
+            if existing is not None:
+                print(f"{target}: existing version found; comparing original package bytes")
+                pull_compare(uri, data, artifact, env)
+            plans.append((target, parent, uri, existing, env))
+        failures = []
+        for target, parent, uri, existing, env in plans:
+            try:
+                if existing is None:
+                    subprocess.run(["helm", "push", str(artifact), parent], env=env, check=True)
+                pull_compare(uri, data, artifact, env)
+                with tempfile.TemporaryDirectory() as temporary:
+                    anonymous = helm_environment(Path(temporary))
+                    pull_compare(uri, data, artifact, anonymous)
+                print(f"{target}: anonymously verified {uri}:{data['version']} sha256:{data['package_sha256']}")
+            except (ValueError, OSError, subprocess.CalledProcessError) as error:
+                failures.append(f"{target}: {error}")
+        require(not failures, "Publication incomplete; re-run the failed publish job with its original artifact. "
+                + "; ".join(failures))
 
 
 def main():
@@ -437,6 +495,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("resolve")
     command.add_argument("--ref", required=True)
+    command.add_argument("--channel", choices=("dev", "release"), default="dev")
     command = commands.add_parser("package")
     command.add_argument("--source", type=Path, required=True)
     command.add_argument("--sha", required=True)
@@ -451,7 +510,10 @@ def main():
         if name == "seal":
             command.add_argument("--validation", type=Path, required=True)
         if name == "publish":
-            command.add_argument("--target", choices=TARGETS, required=True)
+            command.add_argument("--source-sha", required=True)
+            command.add_argument("--channel", choices=("dev", "release"), required=True)
+            command.add_argument("--run-number", required=True)
+            command.add_argument("--version", required=True)
     args = vars(parser.parse_args())
     name = args.pop("command")
     globals()[name](**args)
