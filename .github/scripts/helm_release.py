@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import binascii
 from contextlib import ExitStack
 import hashlib
 import json
@@ -123,6 +124,23 @@ def request(url, headers=None):
     )
 
 
+def dockerhub_write_access(token, repository):
+    """Check granted scope from Docker Hub's HTTPS issuer; the registry verifies the JWT."""
+    try:
+        parts = token.split(".")
+        require(len(parts) == 3, "Invalid Docker Hub token format")
+        claims = json.loads(base64.b64decode(parts[1] + "=" * (-len(parts[1]) % 4),
+                                            altchars=b"-_", validate=True))
+    except (ValueError, binascii.Error, UnicodeError):
+        raise ValueError("Cannot verify Docker Hub token write access") from None
+    access = claims.get("access") if isinstance(claims, dict) else None
+    require(isinstance(access, list) and any(
+        isinstance(grant, dict) and grant.get("type") == "repository"
+        and grant.get("name") == repository and isinstance(grant.get("actions"), list)
+        and "pull" in grant["actions"] and "push" in grant["actions"]
+        for grant in access), f"Docker Hub token lacks pull/push access to {repository}")
+
+
 def registry_manifest(host, repository, reference, credentials=None, actions="pull"):
     """Return a digest, or None only for an explicit OCI not-found error."""
     require(actions in ("pull", "pull,push"), "Invalid registry token actions")
@@ -131,10 +149,14 @@ def registry_manifest(host, repository, reference, credentials=None, actions="pu
             "Invalid image repository")
     url = f"https://{host}/v2/{repository}/manifests/{urllib.parse.quote(reference, safe=':')}"
     headers = {"Accept": ACCEPT, "User-Agent": "hugegraph-helm-release"}
+    check_write = host == "registry-1.docker.io" and actions == "pull,push"
     try:
         response = request(url, headers)
+        require(not check_write, "Docker Hub write preflight requires a Bearer authentication challenge")
     except urllib.error.HTTPError as error:
         if error.code != 401:
+            require(not (check_write and error.code == 404),
+                    "Docker Hub write access was not verified before the missing manifest response")
             return registry_error(error)
         challenge = error.headers.get("WWW-Authenticate", "")
         require(challenge.lower().startswith("bearer "), "Registry must provide Bearer authentication")
@@ -160,6 +182,8 @@ def registry_manifest(host, repository, reference, credentials=None, actions="pu
         token = token_data.get("token") or token_data.get("access_token")
         require(isinstance(token, str) and token and "\n" not in token and "\r" not in token,
                 "Registry returned an invalid Bearer token")
+        if check_write:
+            dockerhub_write_access(token, repository)
         headers["Authorization"] = "Bearer " + token
         try:
             response = request(url, headers)

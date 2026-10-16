@@ -1,6 +1,7 @@
 """Exercise Helm publication failure boundaries without registries or credentials."""
 
 import copy
+import base64
 import importlib.util
 import io
 import json
@@ -34,6 +35,12 @@ def response(value, headers=None):
 def http_error(code, value, headers=None):
     return urllib.error.HTTPError("https://registry.example/v2/chart/manifests/1", code,
                                   "error", headers or {}, io.BytesIO(json.dumps(value).encode()))
+
+
+def dockerhub_token(actions=("pull", "push"), repository="hugegraph/hugegraph-helm"):
+    payload = json.dumps({"access": [{"type": "repository", "name": repository,
+                                      "actions": list(actions)}]}).encode()
+    return "header." + base64.urlsafe_b64encode(payload).decode().rstrip("=") + ".signature"
 
 
 def archive(path, metadata):
@@ -173,7 +180,7 @@ class RegistryTests(unittest.TestCase):
         for host, realm in (("ghcr.io", "https://ghcr.io/token"),
                             ("registry-1.docker.io", "https://auth.docker.io/token")):
             unauthorized = http_error(401, {}, {"WWW-Authenticate": f'Bearer realm="{realm}"'})
-            replies = [unauthorized, response({"token": "token"}),
+            replies = [unauthorized, response({"token": dockerhub_token() if host == "registry-1.docker.io" else "token"}),
                        http_error(404, {"errors": [{"code": "MANIFEST_UNKNOWN"}]})]
             calls = []
             def perform(url, headers):
@@ -188,6 +195,26 @@ class RegistryTests(unittest.TestCase):
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(calls[1][0]).query)
             self.assertEqual(query["scope"], ["repository:hugegraph/hugegraph-helm:pull,push"])
             self.assertTrue(calls[1][1]["Authorization"].startswith("Basic "))
+
+    def test_dockerhub_read_only_wrong_repository_and_malformed_tokens_fail_preflight(self):
+        for token in (dockerhub_token(("pull",)), dockerhub_token(repository="hugegraph/another-chart"),
+                      "opaque", "header.invalid!.signature", "header.bnVsbA.signature"):
+            unauthorized = http_error(401, {}, {"WWW-Authenticate":
+                'Bearer realm="https://auth.docker.io/token",service="registry.docker.io"'})
+            with self.subTest(token=token), patch.object(release, "request", side_effect=[
+                    unauthorized, response({"token": token})]) as request:
+                with self.assertRaisesRegex(ValueError, "Docker Hub"):
+                    release.registry_manifest("registry-1.docker.io", "hugegraph/hugegraph-helm",
+                                              "0.2.0", ("user", "password"), actions="pull,push")
+                self.assertEqual(request.call_count, 2)
+
+    def test_dockerhub_write_preflight_cannot_skip_the_token_scope_check(self):
+        for result in (response({"schemaVersion": 2}),
+                       http_error(404, {"errors": [{"code": "MANIFEST_UNKNOWN"}]})):
+            with self.subTest(result=result), patch.object(release, "request", side_effect=[result]):
+                with self.assertRaisesRegex(ValueError, "Docker Hub"):
+                    release.registry_manifest("registry-1.docker.io", "hugegraph/hugegraph-helm",
+                                              "0.2.0", ("user", "password"), actions="pull,push")
 
     def test_authenticated_404_is_explicitly_required(self):
         unauthorized = http_error(401, {}, {"WWW-Authenticate": 'Bearer realm="https://auth.docker.io/token"'})
@@ -236,6 +263,7 @@ class BundleTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.commands = []
+        self.registry_lookup = release.registry_manifest
         self.mocks = [patch.object(release.subprocess, "check_output", side_effect=self.check_output),
                       patch.object(release.subprocess, "run", side_effect=self.helm_run),
                       patch.object(release, "registry_manifest", return_value=DIGEST),
@@ -538,6 +566,18 @@ class BundleTests(unittest.TestCase):
         manifest_sha = self.seal()
         with patch.object(release, "registry_manifest", side_effect=[None, urllib.error.URLError("offline")]):
             with self.assertRaises(urllib.error.URLError):
+                self.publish(manifest_sha)
+        self.assertFalse(any(args[:2] == ["helm", "push"] for args, _ in self.commands))
+
+    def test_dockerhub_pull_only_token_blocks_uploads_to_both_registries(self):
+        manifest_sha = self.seal()
+        unauthorized = http_error(401, {}, {"WWW-Authenticate":
+            'Bearer realm="https://auth.docker.io/token",service="registry.docker.io"'})
+        replies = [http_error(404, {"errors": [{"code": "MANIFEST_UNKNOWN"}]}),
+                   unauthorized, response({"token": dockerhub_token(("pull",))})]
+        with patch.object(release, "registry_manifest", side_effect=self.registry_lookup), \
+                patch.object(release, "request", side_effect=replies):
+            with self.assertRaisesRegex(ValueError, "lacks pull/push access"):
                 self.publish(manifest_sha)
         self.assertFalse(any(args[:2] == ["helm", "push"] for args, _ in self.commands))
 
