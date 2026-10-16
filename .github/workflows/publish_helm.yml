@@ -50,9 +50,8 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-          # A paired source PR can be validated before its Chart rename merges.
-          # Manual runs use their explicit input; PR runs never publish.
-          SOURCE_REF: ${{ inputs.source_ref || vars.HELM_CI_SOURCE_REF || 'master' }}
+          # PRs validate merged Apache master; manual runs use their selected ref.
+          SOURCE_REF: ${{ inputs.source_ref || 'master' }}
         run: |
           python .github/scripts/helm_release.py resolve --ref "$SOURCE_REF"
           printf 'source_ref=%s\n' "$SOURCE_REF" >> "$GITHUB_OUTPUT"

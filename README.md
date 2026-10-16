@@ -48,7 +48,7 @@ Use `FROM --platform=$BUILDPLATFORM` for portable build stages so Maven/Node pac
 
 [`publish_helm.yml`](.github/workflows/publish_helm.yml) manually packages and tests the HStore cluster chart from `apache/hugegraph` (HugeGraph 1.8.0 and later). It resolves the selected ref once, and defaults to publishing the same tested package to both public OCI registries:
 
-Pull requests touching the Helm pipeline also run validation on GitHub runners, with publication disabled. They use Apache master by default; during a paired source change, maintainers can set the non-secret repository variable `HELM_CI_SOURCE_REF` to its Apache PR ref (for example `refs/pull/123/head`) or commit. Remove the override once the source change is merged. Manual runs keep their explicit `source_ref` input.
+Pull requests touching the Helm pipeline also run validation on GitHub runners, with publication disabled. They use merged Apache master; manual runs use their explicit `source_ref` input.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
