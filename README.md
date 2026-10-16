@@ -58,7 +58,7 @@ Pull requests touching the Helm pipeline also run validation on GitHub runners, 
 
 Chart versions are independent from application versions: Chart `0.2.1` can deploy HugeGraph `1.8.0`. Development packages, such as `0.2.0-dev.123`, may use `latest` images. Formal packages require a published, non-prerelease GitHub Release for `appVersion >= 1.8.0`, matching released PD/Store/Server image tags or pinned digests, and fixed images for all rendered containers. Hubble keeps its own version. Maintain formal versions and image references in the source repository; this workflow does not rewrite them. Formal source commits must already be in Apache master history; Chart fixes may use later master commits after the service release.
 
-Before first use, merge the source Chart rename (the directory stays `helm/hugegraph`) and this workflow. Create the public Docker Hub repository `hugegraph/hugegraph-helm`; existing `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` secrets must authorize writes there. GHCR uses the workflow's `GITHUB_TOKEN` with `packages: write`. If a GHCR package already exists, grant `hugegraph/actions` write access under **Manage Actions access**. Public source metadata and package access are separate settings.
+Before first use, ensure the selected source contains the Chart rename (the directory stays `helm/hugegraph`) and the workflow is registered in GitHub Actions. Create the public Docker Hub repository `hugegraph/hugegraph-helm`; existing `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` secrets must authorize writes there. GHCR uses the workflow's `GITHUB_TOKEN` with `packages: write`. If a GHCR package already exists, grant `hugegraph/actions` write access under **Manage Actions access**. Public source metadata and package access are separate settings.
 
 Each run performs lint, preset rendering, source packaging regressions and Helm unit tests, then installs the final `.tgz` into a disposable kind cluster with 1 PD, 1 Store and 1 Server. CI keeps PVCs enabled, disables Hubble, bounds main-container memory to 1/2/2 GiB, and checks readiness, mounted PVC writes, authentication and committed graph CRUD. Image tags are resolved once to digests for that run's installation. These are CI limits and a core-cluster smoke test, not production sizing or Hubble/HA coverage. A failed test blocks both publishers.
 
@@ -148,7 +148,7 @@ actionlint .github/workflows/publish_python.yml .github/workflows/_build_python_
 
 </details>
 
-A new manual workflow must first reach the default branch to register dispatch; subsequent runs can select another workflow branch with `gh workflow run --ref`.
+Once a workflow is registered in GitHub Actions, manual runs can select a workflow branch with `gh workflow run --ref`. A first PR validation run can register this Helm workflow before it reaches the default branch.
 
 ## Maintenance
 
