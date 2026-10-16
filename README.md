@@ -1,6 +1,6 @@
 # HugeGraph Actions
 
-Shared workflows for publishing HugeGraph Docker images and Python packages, validating releases, and repository automation.
+Shared workflows for publishing HugeGraph Docker images, Helm charts and Python packages, validating releases, and repository automation.
 
 ## Image publishing architecture
 
@@ -17,7 +17,7 @@ Thin component wrappers call either [the standard image publisher](.github/workf
 | Latest | Scheduled or manual | Default source uses `latest`; other refs can derive a tag or use `image_tag` | Skipped only for the configured default source without an explicit tag |
 | Release | Manual | Explicit `source_ref`; standard images can derive the version, PD/Store/Server requires `image_tag=x.y.z` | Always runs |
 
-Manual latest runs default to validation (`publish=false`): build all configured platforms and read caches without pushing images, exporting caches, or updating `LAST_*_HASH`. Scheduled runs publish automatically. Set `publish=true` to publish manually; use an explicit `image_tag` for branch builds.
+Manual latest runs default to publishing (`publish=true`). Uncheck `publish` to build all configured platforms and read caches without pushing images, exporting caches, or updating `LAST_*_HASH`. Scheduled runs publish automatically. Use an explicit `image_tag` for branch builds.
 
 Use `source_repository` to select the component's Apache or HugeGraph repository and `source_ref` for a branch, tag or commit. The resolved source SHA and destination `image_tag` are independent.
 
@@ -43,6 +43,46 @@ The runner uses 1 PD + 1 Store + 1 Server, with 1 GiB each for PD/Store and 1.5 
 ### Multi-platform builds
 
 Use `FROM --platform=$BUILDPLATFORM` for portable build stages so Maven/Node packaging runs natively; leave runtime stages on the target platform. Native libraries, JNI/CGO and architecture-specific downloads need cross-compilation or native target runners plus runtime tests. See [Docker's build strategies](https://docs.docker.com/build/building/multi-platform/) and [platform arguments](https://docs.docker.com/reference/dockerfile/#automatic-platform-args-in-the-global-scope).
+
+## Helm charts
+
+[`publish_helm.yml`](.github/workflows/publish_helm.yml) distributes `helm/hugegraph` (`Chart.name: hugegraph-helm`) from Apache HugeGraph **1.8.0+**. Manual runs default to validation and publication; pull requests validate merged Apache master without publishing.
+
+![HugeGraph Helm validation and publication flow](.github/assets/helm-publishing-flow.png)
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `source_ref` | `master` | Apache branch, tag or commit; resolved once to a commit |
+| `channel` | `dev` | Append `-dev.<run_number>`, or use the source Chart version for `release` |
+| `publish` | `true` | Publish after validation; disable to retain a tested package only |
+
+Chart versions are independent: Chart `0.2.1` can deploy HugeGraph `1.8.0`. Development packages allow `latest` images. Formal packages require a published, non-prerelease service Release, `appVersion >= 1.8.0`, released component versions or digests, and fixed images for every rendered container. Hubble has its own version. Maintain versions in source; CI does not rewrite formal versions. Formal commits must belong to Apache master history, allowing later Chart fixes after a service release.
+
+**Validation.** Source-controlled lint, preset rendering, packaging regressions and Chart unit tests run in an isolated job without publication credentials. A clean workspace packages once, then installs that exact `.tgz` on a GitHub runner: 1 PD + 1 Store + 1 Server, PVCs enabled, Hubble disabled, memory bounded to 1/2/2 GiB. Checks cover readiness, mounted PVC writes, authentication, schema definitions, vertex/edge CRUD, index queries, rollback and independent-request reads. Store/Server Pod recreation must preserve committed data; cleanup is verified. These are smoke-test limits, not production sizing or HA coverage. Any failure blocks publication.
+
+Tools use pinned SHA256 checksums. CI resolves component and helper images to digests, records runtime evidence and uses those digests for testing. Published Chart image references remain unchanged: version tags can move, so configure source values with digests when consumers need identical image content.
+
+**Publication and recovery.** One lock per Chart/version covers both registries. Preflight checks both before uploading; differing existing content or registry errors block writes. Matching copies are skipped. Both authenticated and anonymous pulls must match the original package SHA256 and metadata. Registries have no shared transaction: a later failure can leave one published copy. **Re-run failed jobs** to complete publication with the original bundle, retained for 30 days subject to repository policy. An expired/deleted artifact fails recovery; use a new development run or source-maintained formal version.
+
+**Setup.** Pre-create public Docker Hub repository `hugegraph/hugegraph-helm`; `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` need write access. GHCR uses `GITHUB_TOKEN` with `packages: write`; grant `hugegraph/actions` access to an existing package. After first upload, an administrator makes GHCR Public, then re-runs the failed publisher. Later versions work with organization-wide Public package creation disabled.
+
+Use GHCR for public CI; Docker Hub is the alternative. Select an actually published version:
+
+```bash
+helm pull oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
+helm install hugegraph oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
+helm pull oci://registry-1.docker.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
+```
+
+Register the full GHCR address in [Artifact Hub](https://artifacthub.io/docs/topics/repositories/helm-charts/); Verified Publisher and Official badges require separate verification. Offline users can install the pulled `.tgz` directly or `helm push` it into an OCI registry. HTTP repositories require their upload mechanism and `index.yaml`. Mirror container images separately and override their addresses; the Chart archive contains no images.
+
+Local helper checks require no Docker or upload:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_helm*.py' -v
+bash tests/test_publish_prepare.sh
+actionlint .github/workflows/publish_helm.yml .github/workflows/publish_latest_*.yml
+```
 
 ## Python packages
 
@@ -104,7 +144,7 @@ actionlint .github/workflows/publish_python.yml .github/workflows/_build_python_
 
 </details>
 
-A new manual workflow must first reach the default branch to register dispatch; subsequent runs can select another workflow branch with `gh workflow run --ref`.
+Once a workflow is registered in GitHub Actions, manual runs can select a workflow branch with `gh workflow run --ref`. A first PR validation run can register this Helm workflow before it reaches the default branch.
 
 ## Maintenance
 

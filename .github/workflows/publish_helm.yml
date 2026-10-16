@@ -1,0 +1,243 @@
+name: Publish HugeGraph Helm
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/publish_helm.yml'
+      - '.github/scripts/helm*'
+      - '.github/scripts/install_helm_tools.sh'
+      - '.github/helm-ci/**'
+      - 'tests/test_helm*.py'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Apache HugeGraph source branch, tag, or commit (1.8.0+)
+        required: true
+        default: master
+        type: string
+      channel:
+        description: Development package or already released service
+        required: true
+        type: choice
+        default: dev
+        options: [dev, release]
+      publish:
+        description: Publish tested package to GHCR and Docker Hub
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.source_sha }}
+      ref: ${{ steps.resolve.outputs.source_ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Resolve immutable Apache source
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # PRs validate merged Apache master; manual runs use their selected ref.
+          SOURCE_REF: ${{ inputs.source_ref || 'master' }}
+          CHANNEL: ${{ inputs.channel || 'dev' }}
+        run: |
+          python .github/scripts/helm_release.py resolve --ref "$SOURCE_REF" --channel "$CHANNEL"
+          printf 'source_ref=%s\n' "$SOURCE_REF" >> "$GITHUB_OUTPUT"
+
+  chart_checks:
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: apache/hugegraph
+          ref: ${{ needs.source.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Chart regression checks in an isolated job
+        env:
+          HELM_PLUGINS: ${{ runner.temp }}/helm-plugins
+        run: |
+          set -euo pipefail
+          bash .github/scripts/install_helm_tools.sh --with-unittest
+          export PATH="${RUNNER_TEMP}/hugegraph-helm-bin:$PATH"
+          for preset in values.yaml values-single.yaml values-cluster.yaml values-strict.yaml; do
+            helm lint source/helm/hugegraph -f "source/helm/hugegraph/$preset" --strict
+            helm template ci source/helm/hugegraph -f "source/helm/hugegraph/$preset" > /dev/null
+          done
+          python -m unittest discover -s source/helm -p 'test_helm_package.py' -v
+          helm unittest source/helm/hugegraph
+
+  validate:
+    needs: [source, chart_checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      manifest_sha: ${{ steps.seal.outputs.manifest_sha }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Refuse rebuilding an already retained package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          artifact_ids=$(gh api --paginate "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.name == "helm-tested") | .id')
+          if [ -n "$artifact_ids" ]; then
+            echo '::error::The original package already exists. Re-run failed publish jobs; do not rebuild this version.'
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: apache/hugegraph
+          ref: ${{ needs.source.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Install verified Helm and kind
+        run: bash .github/scripts/install_helm_tools.sh --with-kind
+      - name: Publication helper and existing dispatch regressions
+        run: |
+          python -m unittest discover -s tests -p 'test_helm*.py' -v
+          bash tests/test_publish_prepare.sh
+      - name: Package once and check source release and image availability
+        id: package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          SOURCE_REF: ${{ needs.source.outputs.ref }}
+          CHANNEL: ${{ inputs.channel || 'dev' }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: >-
+          python .github/scripts/helm_release.py package
+          --source source --sha "$SOURCE_SHA" --ref "$SOURCE_REF"
+          --channel "$CHANNEL" --run-number "$RUN_NUMBER" --dist dist
+      - name: Test final package with schema, CRUD and persisted Pod recovery
+        env:
+          PACKAGE: ${{ steps.package.outputs.package }}
+          HELM_IMAGE_VALUES: ${{ github.workspace }}/dist/image-values.yaml
+        run: bash .github/scripts/helm_kind_smoke.sh "dist/$PACKAGE" evidence
+      - name: Bind runtime evidence to the original package
+        id: seal
+        env:
+          MANIFEST_SHA: ${{ steps.package.outputs.manifest_sha }}
+        run: >-
+          python .github/scripts/helm_release.py seal --dist dist
+          --manifest-sha "$MANIFEST_SHA" --validation evidence/validation.json
+      - name: Retain runtime diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: helm-diagnostics-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Record validation result
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          {
+            echo '### HugeGraph Helm validation'
+            echo "- Chart: hugegraph-helm $VERSION"
+            echo "- Source: apache/hugegraph@$SOURCE_SHA"
+            echo '- Tested 1 PD + 1 Store + 1 Server: schema, vertex/edge CRUD, indexes, rollback and data recovery after Pod recreation.'
+            echo '- Recover by re-running the failed publish job with its retained package.'
+            echo '- A new dev dispatch gets a new version; a new release dispatch must not reuse an occupied Chart version.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # Keep the immutable artifact upload last: once it exists, this job must
+      # finish successfully so failed publisher jobs can reuse its outputs.
+      - name: Retain the tested package for publication and recovery
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: helm-tested
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false
+
+  publish:
+    needs: [source, validate]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: helm-publish-hugegraph-helm-${{ needs.validate.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Install verified Helm
+        run: bash .github/scripts/install_helm_tools.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifact_id }}
+          path: dist
+          merge-multiple: true
+      - name: Preflight both registries, then publish and verify the original package
+        env:
+          MANIFEST_SHA: ${{ needs.validate.outputs.manifest_sha }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          CHANNEL: ${{ inputs.channel }}
+          RUN_NUMBER: ${{ github.run_number }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_PASSWORD: ${{ github.token }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+        run: >-
+          python .github/scripts/helm_release.py publish --dist dist --manifest-sha "$MANIFEST_SHA"
+          --source-sha "$SOURCE_SHA" --channel "$CHANNEL" --run-number "$RUN_NUMBER" --version "$VERSION"
+      - name: Record registry verification
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          echo "- GHCR and Docker Hub: hugegraph-helm $VERSION, authenticated and anonymous pulls match the tested package." >> "$GITHUB_STEP_SUMMARY"
