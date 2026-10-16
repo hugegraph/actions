@@ -212,10 +212,11 @@ kubectl -n "$namespace" get pvc -o json >"$tmp/before-restart-pvc.json"
 for component in store server; do
   selector="app.kubernetes.io/instance=$release,app.kubernetes.io/component=$component"
   pod=$(kubectl -n "$namespace" get pod -l "$selector" -o jsonpath='{.items[0].metadata.name}')
+  grace=$(kubectl -n "$namespace" get pod "$pod" -o jsonpath='{.spec.terminationGracePeriodSeconds}')
   kubectl -n "$namespace" logs "$pod" --all-containers --timestamps \
     >"$evidence/$component-before-restart.log" 2>&1
   {
-    kubectl -n "$namespace" delete pod "$pod" --wait=true --timeout=90s
+    kubectl -n "$namespace" delete pod "$pod" --wait=true --timeout="$((grace + 30))s"
     kubectl -n "$namespace" wait pod -l "$selector" --for=create --timeout=90s
     kubectl -n "$namespace" wait pod -l "$selector" --for=condition=Ready --timeout=180s
   } >>"$evidence/pod-recreation.log" 2>&1

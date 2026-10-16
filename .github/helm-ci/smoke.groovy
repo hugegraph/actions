@@ -94,8 +94,19 @@ def verifySentinel = {
 };
 
 if (phase == 'cleanup') {
-    clean();
-    graph.tx().rollback();
+    // Capture only this run's incident edge IDs before vertex deletion; an
+    // empty E() would scan every application edge, so guard the lookup.
+    def sentinelEdges = g.V(a, b).bothE(edgeLabel).id().toList() as Set;
+    try {
+        clean();
+        if (!sentinelEdges.isEmpty()) {
+            check(!g.E(sentinelEdges.toArray()).hasNext(), 'deleted sentinel edges remain');
+        }
+        check(indexedIds(run + '-sentinel-a').isEmpty() &&
+              indexedIds(run + '-sentinel-b').isEmpty(), 'deleted sentinel index entries remain');
+    } finally {
+        graph.tx().rollback();
+    }
 } else if (phase == 'verify') {
     try {
         verifySentinel();
