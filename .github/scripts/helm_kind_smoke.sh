@@ -90,8 +90,13 @@ with tarfile.open(package, 'r:gz') as archive:
     if len(presets) != 1:
         raise SystemExit('Package must contain exactly one root values-single.yaml')
     pathlib.Path(out, 'values-single.yaml').write_bytes(archive.extractfile(presets[0]).read())
-pathlib.Path(out, 'smoke.groovy').write_text(
-    pathlib.Path(smoke).read_text().replace('__HELM_CI_RUN__', 'helm-ci-' + run))
+import json
+script = pathlib.Path(smoke).read_text().replace('__HELM_CI_RUN__', 'helm-ci-' + run)
+for phase in ('exercise', 'verify', 'cleanup'):
+    rendered = script.replace('__HELM_CI_PHASE__', phase)
+    pathlib.Path(out, phase + '.groovy').write_text(rendered)
+    pathlib.Path(out, phase + '.json').write_text(json.dumps({
+        'gremlin': rendered, 'aliases': {'graph': 'DEFAULT-hugegraph'}}))
 PY
 docker info >/dev/null
 # Mark before create so partial failures are also cleaned up.
@@ -124,7 +129,7 @@ if [[ -n "${HELM_IMAGE_VALUES:-}" ]]; then
   values+=(-f "$HELM_IMAGE_VALUES")
 fi
 helm install "$release" "$package" --namespace "$namespace" --create-namespace \
-  "${values[@]}" --set-file "server.testGremlin=$tmp/smoke.groovy" \
+  "${values[@]}" --set-file "server.testGremlin=$tmp/exercise.groovy" \
   --wait --timeout 15m >"$evidence/install.log" 2>&1
 for component in pd store server; do
   kubectl -n "$namespace" wait pod -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=$component" \
@@ -183,6 +188,54 @@ kubectl -n "$namespace" exec "$server_pod" -c server -- sh -ec '
 '
 helm test "$release" --namespace "$namespace" --logs --timeout 5m \
   >"$evidence/helm-test.log" 2>&1
+
+request_phase() {
+  local phase=$1 record=$2
+  # The password stays inside the Server container and reaches curl via stdin.
+  # The JSON body contains only this run's script, never credentials.
+  # shellcheck disable=SC2016
+  kubectl --request-timeout=30s -n "$namespace" exec -i "$server_pod" -c server -- sh -ec '
+    body=$(cat)
+    auth=$(printf "admin:%s" "$PASSWORD" | base64 | tr -d "\r\n")
+    printf '\''header = "Authorization: Basic %s"\n'\'' "$auth" |
+      curl --config - --fail-with-body --silent --show-error --compressed \
+        --connect-timeout 3 --max-time 20 -H "Content-Type: application/json" \
+        --data-binary "$body" http://127.0.0.1:8080/gremlin
+  ' <"$tmp/$phase.json" >"$evidence/$record.json" 2>"$evidence/$record.stderr" || return 1
+  python3 "$script_dir/helm_smoke_checks.py" response "$phase" "$evidence/$record.json"
+}
+
+# A separate HTTP request must see the committed sentinel before any restart.
+request_phase verify before-restart
+kubectl -n "$namespace" get pods -o json >"$tmp/before-restart-pods.json"
+kubectl -n "$namespace" get pvc -o json >"$tmp/before-restart-pvc.json"
+for component in store server; do
+  selector="app.kubernetes.io/instance=$release,app.kubernetes.io/component=$component"
+  pod=$(kubectl -n "$namespace" get pod -l "$selector" -o jsonpath='{.items[0].metadata.name}')
+  kubectl -n "$namespace" logs "$pod" --all-containers --timestamps \
+    >"$evidence/$component-before-restart.log" 2>&1
+  {
+    kubectl -n "$namespace" delete pod "$pod" --wait=true --timeout=90s
+    kubectl -n "$namespace" wait pod -l "$selector" --for=create --timeout=90s
+    kubectl -n "$namespace" wait pod -l "$selector" --for=condition=Ready --timeout=180s
+  } >>"$evidence/pod-recreation.log" 2>&1
+done
+server_pod=$(kubectl -n "$namespace" get pod -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=server" -o jsonpath='{.items[0].metadata.name}')
+# Read-only retries allow backend recovery without recreating the missing data.
+deadline=$((SECONDS + 150))
+until request_phase verify after-restart; do
+  if (( SECONDS >= deadline )); then
+    echo 'Committed schema, vertices, edge or index failed to recover after Pod recreation' >&2
+    exit 1
+  fi
+  sleep 5
+done
+kubectl -n "$namespace" get pods -o json >"$tmp/after-restart-pods.json"
+kubectl -n "$namespace" get pvc -o json >"$tmp/after-restart-pvc.json"
+python3 "$script_dir/helm_smoke_checks.py" recovery \
+  "$tmp/before-restart-pods.json" "$tmp/after-restart-pods.json" \
+  "$tmp/before-restart-pvc.json" "$tmp/after-restart-pvc.json" >"$evidence/recovery.json"
+request_phase cleanup cleanup
 kubectl -n "$namespace" get pods -o json >"$tmp/final-pods.json"
 python3 - "$package" "$tmp/final-pods.json" "$evidence/validation.json" "$node_image" <<'PY'
 import hashlib, json, pathlib, sys
@@ -222,7 +275,10 @@ for pod in pods:
 pathlib.Path(target).write_text(json.dumps({'status': 'passed',
     'package_sha256': package_sha, 'source_sha': manifest['source_sha'],
     'node_image': node, 'topology': {'pd': 1, 'store': 1, 'server': 1},
-    'persistence': 'two bound PVCs mounted and write checked',
-    'helm_test': 'Succeeded (including committed CRUD)', 'images': images}, indent=2) + '\n')
+    'persistence': 'same two bound PVCs after Store/Server Pod recreation',
+    'recovery': json.loads(pathlib.Path(target).with_name('recovery.json').read_text()),
+    'helm_test': 'Succeeded (schema, vertex/edge CRUD, index maintenance and rollback)',
+    'cross_request_reads': 'passed before and after Pod recreation',
+    'cleanup': 'passed', 'images': images}, indent=2) + '\n')
 PY
-echo "Helm package passed persisted 1 PD + 1 Store + 1 Server and CRUD validation."
+echo "Helm package passed schema, vertex/edge CRUD, index, rollback and persisted Pod recovery validation."

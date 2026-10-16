@@ -46,46 +46,40 @@ Use `FROM --platform=$BUILDPLATFORM` for portable build stages so Maven/Node pac
 
 ## Helm charts
 
-[`publish_helm.yml`](.github/workflows/publish_helm.yml) manually packages and tests the HStore cluster chart from `apache/hugegraph` (HugeGraph 1.8.0 and later). It resolves the selected ref once, and defaults to publishing the same tested package to both public OCI registries.
+[`publish_helm.yml`](.github/workflows/publish_helm.yml) distributes `helm/hugegraph` (`Chart.name: hugegraph-helm`) from Apache HugeGraph **1.8.0+**. Manual runs default to validation and publication; pull requests validate merged Apache master without publishing.
 
-Pull requests touching the Helm pipeline also run validation on GitHub runners, with publication disabled. They use merged Apache master; manual runs use their explicit `source_ref` input.
+![HugeGraph Helm validation and publication flow](.github/assets/helm-publishing-flow.png)
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `source_ref` | `master` | Apache HugeGraph branch, tag or commit containing `helm/hugegraph` with `Chart.name: hugegraph-helm` |
-| `channel` | `dev` | `dev` appends `-dev.<run_number>` to the source Chart version; `release` uses its unmodified version |
-| `publish` | `true` | Upload to both GHCR and Docker Hub after all checks pass; uncheck to validate and retain the package only |
+| `source_ref` | `master` | Apache branch, tag or commit; resolved once to a commit |
+| `channel` | `dev` | Append `-dev.<run_number>`, or use the source Chart version for `release` |
+| `publish` | `true` | Publish after validation; disable to retain a tested package only |
 
-Chart versions are independent from application versions: Chart `0.2.1` can deploy HugeGraph `1.8.0`. Development packages, such as `0.2.0-dev.123`, may use `latest` images. Formal packages require a published, non-prerelease GitHub Release for `appVersion >= 1.8.0`, matching released PD/Store/Server image tags or pinned digests, and fixed images for all rendered containers. Hubble keeps its own version. Maintain formal versions and image references in the source repository; this workflow does not rewrite them. Formal source commits must already be in Apache master history; Chart fixes may use later master commits after the service release. This ancestry check runs before source-controlled tests. Those tests run in a separate job without publication credentials and cannot modify the packaging or publishing workspace. The clean publisher also binds the bundle to the resolved source, requested channel, workflow run and locked Chart version.
+Chart versions are independent: Chart `0.2.1` can deploy HugeGraph `1.8.0`. Development packages allow `latest` images. Formal packages require a published, non-prerelease service Release, `appVersion >= 1.8.0`, released component versions or digests, and fixed images for every rendered container. Hubble has its own version. Maintain versions in source; CI does not rewrite formal versions. Formal commits must belong to Apache master history, allowing later Chart fixes after a service release.
 
-Before first use, ensure the selected source contains the Chart rename (the directory stays `helm/hugegraph`) and the workflow is registered in GitHub Actions. Create the public Docker Hub repository `hugegraph/hugegraph-helm`; existing `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` secrets must authorize writes there. GHCR uses the workflow's `GITHUB_TOKEN` with `packages: write`. If a GHCR package already exists, grant `hugegraph/actions` write access under **Manage Actions access**. Public source metadata and package access are separate settings.
+**Validation.** Source-controlled lint, preset rendering, packaging regressions and Chart unit tests run in an isolated job without publication credentials. A clean workspace packages once, then installs that exact `.tgz` on a GitHub runner: 1 PD + 1 Store + 1 Server, PVCs enabled, Hubble disabled, memory bounded to 1/2/2 GiB. Checks cover readiness, mounted PVC writes, authentication, schema definitions, vertex/edge CRUD, index queries, rollback and independent-request reads. Store/Server Pod recreation must preserve committed data; cleanup is verified. These are smoke-test limits, not production sizing or HA coverage. Any failure blocks publication.
 
-Each run performs lint, preset rendering, source packaging regressions and Helm unit tests, then installs the final `.tgz` into a disposable kind cluster with 1 PD, 1 Store and 1 Server. CI keeps PVCs enabled, disables Hubble, bounds main-container memory to 1/2/2 GiB, and checks readiness, mounted PVC writes, authentication and committed graph CRUD. Component images and independently configured init/test helper images are resolved once to digests for that run's installation; unsupported extra images must already use digests or validation fails. Runtime evidence includes init containers. Helm, kind and helm-unittest downloads are checked against SHA256 values pinned in this repository. These are CI limits and a core-cluster smoke test, not production sizing or Hubble/HA coverage. A failed test blocks publication.
+Tools use pinned SHA256 checksums. CI resolves component and helper images to digests, records runtime evidence and uses those digests for testing. Published Chart image references remain unchanged: version tags can move, so configure source values with digests when consumers need identical image content.
 
-A single publisher holds one concurrency lock per Chart name/version across both registries. Before any upload, it checks both registries and compares any existing package with the original `.tgz`; a conflict or failed preflight blocks all writes. It then uploads missing copies and succeeds only after **both** authenticated and anonymous pulls match the original `.tgz` SHA256 and Chart metadata. Existing identical versions are skipped without overwriting. The two registries do not provide a shared transaction: a post-preflight failure may leave one copy published, and retrying the failed publisher completes the other with the original bytes. Authentication, rate limits and network errors never count as an absent version. Helm adds the Chart name to a push's parent path, so pushes target `oci://ghcr.io/hugegraph` and `oci://registry-1.docker.io/hugegraph`.
+**Publication and recovery.** One lock per Chart/version covers both registries. Preflight checks both before uploading; differing existing content or registry errors block writes. Matching copies are skipped. Both authenticated and anonymous pulls must match the original package SHA256 and metadata. Registries have no shared transaction: a later failure can leave one published copy. **Re-run failed jobs** to complete publication with the original bundle, retained for 30 days subject to repository policy. An expired/deleted artifact fails recovery; use a new development run or source-maintained formal version.
 
-GHCR initially creates private packages. After its first successful upload, an administrator must set the package to **Public**. The publisher will fail its GHCR anonymous check until that is done; then **re-run failed jobs**. It will check both registries again and reuse matching copies. Once the package is Public, the organization can disable creation of new Public packages without interrupting later versions of this package. The original tested bundle is retained for 30 days (subject to repository retention limits). Recovery downloads that exact artifact ID, verifies its manifest and package hashes, skips matching uploads and completes the missing verification. Do not re-run the entire workflow to rebuild an occupied version. If the original artifact expired or was deleted, recovery fails; dispatch a new development run, or publish a new source-maintained formal Chart version.
+**Setup.** Pre-create public Docker Hub repository `hugegraph/hugegraph-helm`; `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` need write access. GHCR uses `GITHUB_TOKEN` with `packages: write`; grant `hugegraph/actions` access to an existing package. After first upload, an administrator makes GHCR Public, then re-runs the failed publisher. Later versions work with organization-wide Public package creation disabled.
 
-A formal `x.y.z` image tag is a released version label, but the registry can still repoint it. CI records the tested digests in `manifest.json` and uses `image-values.yaml` for the smoke installation; it does not rewrite image references inside the published Chart. Set image digests in the source Chart values when consumers must always run exactly the same image content.
-
-Public CI should use GHCR by default; Docker Hub is the alternative distribution channel. These examples use an illustrative Chart version—select a version that has actually been published:
+Use GHCR for public CI; Docker Hub is the alternative. Select an actually published version:
 
 ```bash
-helm pull oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0
-helm install hugegraph oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0
-helm pull oci://registry-1.docker.io/hugegraph/hugegraph-helm --version 0.2.0
-# Development versions require an explicit prerelease version.
-helm pull oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0-dev.123
+helm pull oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
+helm install hugegraph oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
+helm pull oci://registry-1.docker.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
 ```
 
-After the first anonymously accessible publication, register `oci://ghcr.io/hugegraph/hugegraph-helm` in Artifact Hub as the single Helm OCI source. Indexing does not automatically grant Verified Publisher or Official status. Those badges need their own metadata and ownership verification; see [Artifact Hub OCI registration](https://artifacthub.io/docs/topics/repositories/helm-charts/).
+Register the full GHCR address in [Artifact Hub](https://artifacthub.io/docs/topics/repositories/helm-charts/); Verified Publisher and Official badges require separate verification. Offline users can install the pulled `.tgz` directly or `helm push` it into an OCI registry. HTTP repositories require their upload mechanism and `index.yaml`. Mirror container images separately and override their addresses; the Chart archive contains no images.
 
-For offline use, `helm pull` produces the portable `.tgz`; it can be installed directly or uploaded unchanged into an internal registry. Use `helm push hugegraph-helm-0.2.0.tgz oci://registry.example.com/charts` for OCI. HTTP repositories use their own upload mechanism and must maintain `index.yaml` (for static hosting, `helm repo index --merge`); native `helm push` does not upload HTTP repositories. The community does not need to operate an additional HTTP source. A complete offline installation also needs mirrored PD, Store, Server and optionally Hubble images, plus any custom helper images, Kubernetes and storage prerequisites. Override their registry references in installation values; the Chart archive does not contain container images.
-
-Local publication-helper checks (no upload):
+Local helper checks require no Docker or upload:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_helm_release.py' -v
+python3 -m unittest discover -s tests -p 'test_helm*.py' -v
 bash tests/test_publish_prepare.sh
 actionlint .github/workflows/publish_helm.yml .github/workflows/publish_latest_*.yml
 ```

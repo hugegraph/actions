@@ -7,7 +7,7 @@ on:
       - '.github/scripts/helm*'
       - '.github/scripts/install_helm_tools.sh'
       - '.github/helm-ci/**'
-      - 'tests/test_helm_release.py'
+      - 'tests/test_helm*.py'
   workflow_dispatch:
     inputs:
       source_ref:
@@ -133,7 +133,7 @@ jobs:
         run: bash .github/scripts/install_helm_tools.sh --with-kind
       - name: Publication helper and existing dispatch regressions
         run: |
-          python -m unittest discover -s tests -p 'test_helm_release.py' -v
+          python -m unittest discover -s tests -p 'test_helm*.py' -v
           bash tests/test_publish_prepare.sh
       - name: Package once and check source release and image availability
         id: package
@@ -147,7 +147,7 @@ jobs:
           python .github/scripts/helm_release.py package
           --source source --sha "$SOURCE_SHA" --ref "$SOURCE_REF"
           --channel "$CHANNEL" --run-number "$RUN_NUMBER" --dist dist
-      - name: Install final package and test persisted 1+1+1 with CRUD
+      - name: Test final package with schema, CRUD and persisted Pod recovery
         env:
           PACKAGE: ${{ steps.package.outputs.package }}
           HELM_IMAGE_VALUES: ${{ github.workspace }}/dist/image-values.yaml
@@ -177,7 +177,7 @@ jobs:
             echo '### HugeGraph Helm validation'
             echo "- Chart: hugegraph-helm $VERSION"
             echo "- Source: apache/hugegraph@$SOURCE_SHA"
-            echo '- Tested final package with persisted 1 PD + 1 Store + 1 Server and authenticated CRUD.'
+            echo '- Tested 1 PD + 1 Store + 1 Server: schema, vertex/edge CRUD, indexes, rollback and data recovery after Pod recreation.'
             echo '- Recover by re-running the failed publish job with its retained package.'
             echo '- A new dev dispatch gets a new version; a new release dispatch must not reuse an occupied Chart version.'
           } >> "$GITHUB_STEP_SUMMARY"

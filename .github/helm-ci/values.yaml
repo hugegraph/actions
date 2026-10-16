@@ -39,6 +39,7 @@ store:
     limits: {cpu: "1", memory: 2Gi}
 server:
   replicas: 1
+  testGraphAlias: DEFAULT-hugegraph
   javaOpts: "-Xms256m -Xmx1g"
   auth:
     enabled: true
