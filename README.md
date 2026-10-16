@@ -74,7 +74,14 @@ helm install hugegraph oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0-de
 helm pull oci://registry-1.docker.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
 ```
 
-Register the full GHCR address in [Artifact Hub](https://artifacthub.io/docs/topics/repositories/helm-charts/); Verified Publisher and Official badges require separate verification. Offline users can install the pulled `.tgz` directly or `helm push` it into an OCI registry. HTTP repositories require their upload mechanism and `index.yaml`. Mirror container images separately and override their addresses; the Chart archive contains no images.
+Register `oci://ghcr.io/hugegraph/hugegraph-helm` in [Artifact Hub](https://artifacthub.io/docs/topics/repositories/helm-charts/).
+Run [Publish Helm repository metadata](.github/workflows/publish_helm_metadata.yml) to publish the repository ID for Verified Publisher.
+The workflow checks an identical anonymous download. It writes only the separate `artifacthub.io` tag, leaving Chart versions intact.
+Artifact Hub enables the label after processing the repository; Official status requires a separate request.
+
+Offline users can install the pulled `.tgz` directly or `helm push` it into an OCI registry.
+HTTP repositories require their upload mechanism and `index.yaml`.
+Mirror container images separately and override their addresses; the Chart archive contains no images.
 
 Local helper checks require no Docker or upload:
 

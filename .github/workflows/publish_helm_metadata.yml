@@ -1,0 +1,67 @@
+name: Publish Helm repository metadata
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: artifacthub-hugegraph-helm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/helm-ci
+      - name: Install verified ORAS
+        uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+        with:
+          url: https://github.com/oras-project/oras/releases/download/v1.3.4/oras_1.3.4_linux_amd64.tar.gz
+          checksum: f27adb935022d94df8dc77719c322dda592c78a0d57a6f7dcdd8d900b248c454
+      - name: Publish Artifact Hub repository identity
+        working-directory: .github/helm-ci
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_PASSWORD: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          config="$RUNNER_TEMP/artifacthub-auth.json"
+          trap 'rm -f "$config"' EXIT
+          printf '%s' "$GHCR_PASSWORD" | oras login ghcr.io \
+            --username "$GHCR_USERNAME" --password-stdin --registry-config "$config"
+          oras push ghcr.io/hugegraph/hugegraph-helm:artifacthub.io \
+            --registry-config "$config" \
+            --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+            artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+      - name: Verify anonymous access and metadata format
+        working-directory: .github/helm-ci
+        run: |
+          set -euo pipefail
+          config="$RUNNER_TEMP/artifacthub-anonymous.json"
+          printf '{}\n' > "$config"
+          oras pull ghcr.io/hugegraph/hugegraph-helm:artifacthub.io \
+            --registry-config "$config" --output "$RUNNER_TEMP/artifacthub-metadata"
+          cmp artifacthub-repo.yml "$RUNNER_TEMP/artifacthub-metadata/artifacthub-repo.yml"
+          oras manifest fetch ghcr.io/hugegraph/hugegraph-helm:artifacthub.io \
+            --registry-config "$config" > "$RUNNER_TEMP/artifacthub-manifest.json"
+          python3 - "$RUNNER_TEMP/artifacthub-manifest.json" <<'PY'
+          import json, pathlib, sys
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert manifest['config']['mediaType'] == 'application/vnd.cncf.artifacthub.config.v1+yaml'
+          assert len(manifest['layers']) == 1
+          assert manifest['layers'][0]['mediaType'] == 'application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml'
+          PY
+          {
+            echo '### Artifact Hub repository identity'
+            echo '- Published GHCR metadata and verified an identical anonymous download.'
+            echo '- Verified Publisher appears after Artifact Hub processes the repository.'
+          } >> "$GITHUB_STEP_SUMMARY"
