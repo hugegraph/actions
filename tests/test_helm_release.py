@@ -45,6 +45,15 @@ def archive(path, metadata):
 
 
 class ResolveTests(unittest.TestCase):
+    def test_github_api_child_does_not_inherit_registry_credentials(self):
+        credentials = {key: "secret" for key in release.REGISTRY_CREDENTIALS}
+        with patch.dict(os.environ, dict(credentials, GH_TOKEN="api-token")), \
+                patch.object(release.subprocess, "check_output", return_value=b'{"sha":"test"}') as command:
+            self.assertEqual(release.github("commits/master"), {"sha": "test"})
+        env = command.call_args.kwargs["env"]
+        self.assertEqual(env["GH_TOKEN"], "api-token")
+        self.assertFalse(set(credentials) & set(env))
+
     def test_ref_is_resolved_to_an_immutable_apache_commit(self):
         with patch.object(release, "github", return_value={"sha": SHA}) as github:
             self.assertEqual(release.resolve("refs/heads/master"), SHA)

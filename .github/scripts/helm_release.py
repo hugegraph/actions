@@ -25,6 +25,8 @@ TARGETS = {
     "ghcr": ("ghcr.io", "hugegraph"),
     "dockerhub": ("registry-1.docker.io", "hugegraph"),
 }
+REGISTRY_CREDENTIALS = tuple(target.upper() + suffix for target in TARGETS
+                             for suffix in ("_USERNAME", "_PASSWORD"))
 STABLE = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 SHA = r"[0-9a-f]{40}"
 SHA256 = r"[0-9a-f]{64}"
@@ -56,7 +58,10 @@ def output(**values):
 
 
 def github(endpoint):
-    return json.loads(subprocess.check_output(["gh", "api", f"repos/{SOURCE}/{endpoint}"]))
+    env = os.environ.copy()
+    for key in REGISTRY_CREDENTIALS:
+        env.pop(key, None)
+    return json.loads(subprocess.check_output(["gh", "api", f"repos/{SOURCE}/{endpoint}"], env=env))
 
 
 def resolve(ref, channel="dev"):
@@ -419,8 +424,7 @@ def helm_environment(directory):
     (Path(env["DOCKER_CONFIG"]) / "config.json").write_text('{"auths": {}}')
     # Login receives only its own password through stdin. Helm never inherits
     # either registry's credentials (or the GitHub API token) as environment data.
-    for key in ("GHCR_USERNAME", "GHCR_PASSWORD", "DOCKERHUB_USERNAME", "DOCKERHUB_PASSWORD",
-                "GITHUB_TOKEN", "GH_TOKEN"):
+    for key in (*REGISTRY_CREDENTIALS, "GITHUB_TOKEN", "GH_TOKEN"):
         env.pop(key, None)
     return env
 
