@@ -28,6 +28,9 @@ TARGETS = {
 }
 REGISTRY_CREDENTIALS = tuple(target.upper() + suffix for target in TARGETS
                              for suffix in ("_USERNAME", "_PASSWORD"))
+OIDC_ENVIRONMENT = ("ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+SIGNING_WORKFLOW = "hugegraph/actions/.github/workflows/publish_helm.yml"
 STABLE = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 SHA = r"[0-9a-f]{40}"
 SHA256 = r"[0-9a-f]{64}"
@@ -141,7 +144,7 @@ def dockerhub_write_access(token, repository):
         for grant in access), f"Docker Hub token lacks pull/push access to {repository}")
 
 
-def registry_manifest(host, repository, reference, credentials=None, actions="pull"):
+def registry_manifest(host, repository, reference, credentials=None, actions="pull", package_sha256=None):
     """Return a digest, or None only for an explicit OCI not-found error."""
     require(actions in ("pull", "pull,push"), "Invalid registry token actions")
     require(re.fullmatch(r"[a-z0-9.-]+(?::[0-9]+)?", host), "Invalid registry host")
@@ -195,6 +198,15 @@ def registry_manifest(host, repository, reference, credentials=None, actions="pu
         require(data.get("schemaVersion") == 2, "Registry returned an invalid OCI manifest")
         result = response.headers.get("Docker-Content-Digest") or "sha256:" + hashlib.sha256(body).hexdigest()
         require(re.fullmatch("sha256:" + SHA256, result), "Registry returned an invalid manifest digest")
+        if package_sha256 is not None:
+            require(result == "sha256:" + hashlib.sha256(body).hexdigest(), "Manifest digest does not match its bytes")
+            require(data.get("mediaType") == "application/vnd.oci.image.manifest.v1+json"
+                    and data.get("config", {}).get("mediaType") == "application/vnd.cncf.helm.config.v1+json",
+                    "Signing requires a Helm OCI manifest")
+            layers = [layer for layer in data.get("layers", [])
+                      if layer.get("mediaType") == "application/vnd.cncf.helm.chart.content.v1.tar+gzip"]
+            require(len(layers) == 1 and layers[0].get("digest") == "sha256:" + package_sha256,
+                    "Signing subject does not contain the tested chart package")
         return result
 
 
@@ -448,7 +460,7 @@ def helm_environment(directory):
     (Path(env["DOCKER_CONFIG"]) / "config.json").write_text('{"auths": {}}')
     # Login receives only its own password through stdin. Helm never inherits
     # either registry's credentials (or the GitHub API token) as environment data.
-    for key in (*REGISTRY_CREDENTIALS, "GITHUB_TOKEN", "GH_TOKEN"):
+    for key in (*REGISTRY_CREDENTIALS, "GITHUB_TOKEN", "GH_TOKEN", *OIDC_ENVIRONMENT):
         env.pop(key, None)
     return env
 
@@ -479,9 +491,31 @@ def publication_gate(data, source_sha, channel, run_number, version):
         release_gate({"appVersion": data["app_version"]}, source_sha)
 
 
+def signing_identity():
+    workflow_ref = os.environ.get("GITHUB_WORKFLOW_REF", "")
+    require(re.fullmatch(re.escape(SIGNING_WORKFLOW) + r"@refs/(?:heads|tags)/[^\s]+", workflow_ref),
+            "Signing requires the HugeGraph Helm publishing workflow identity")
+    require(all(os.environ.get(key) for key in OIDC_ENVIRONMENT), "Signing requires GitHub Actions OIDC permission")
+    return "https://github.com/" + workflow_ref
+
+
+def sign_chart(target, reference, env, anonymous, identity):
+    """Sign the immutable manifest and verify with no registry or OIDC credentials."""
+    host = TARGETS[target][0]
+    subprocess.run(["cosign", "login", host, "--username", os.environ[target.upper() + "_USERNAME"],
+                    "--password-stdin"], input=os.environ[target.upper() + "_PASSWORD"] + "\n",
+                   text=True, env=env, check=True)
+    signing = dict(env, **{key: os.environ[key] for key in OIDC_ENVIRONMENT})
+    subprocess.run(["cosign", "sign", "--yes", reference], env=signing, check=True)
+    subprocess.run(["cosign", "verify", reference, "--certificate-identity", identity,
+                    "--certificate-oidc-issuer", OIDC_ISSUER], env=anonymous,
+                   stdout=subprocess.DEVNULL, check=True)
+
+
 def publish(dist, manifest_sha, source_sha, channel, run_number, version):
     data, artifact = verify(dist, manifest_sha)
     publication_gate(data, source_sha, channel, run_number, version)
+    identity = signing_identity()
     # The workflow holds ONE chart-version lock for this entire operation.
     # Inspect both registries before either write, including existing package bytes.
     with ExitStack() as stack:
@@ -511,7 +545,17 @@ def publish(dist, manifest_sha, source_sha, channel, run_number, version):
                 with tempfile.TemporaryDirectory() as temporary:
                     anonymous = helm_environment(Path(temporary))
                     pull_compare(uri, data, artifact, anonymous)
-                print(f"{target}: anonymously verified {uri}:{data['version']} sha256:{data['package_sha256']}")
+                    host, repository = uri.removeprefix("oci://").split("/", 1)
+                    manifest_digest = registry_manifest(host, repository, data["version"],
+                                                        package_sha256=data["package_sha256"])
+                    require(manifest_digest is not None, "Published chart manifest is missing")
+                    require(existing is None or existing == manifest_digest, "Chart tag changed after preflight")
+                    reference = f"{host}/{repository}@{manifest_digest}"
+                    sign_chart(target, reference, env, anonymous, identity)
+                    require(registry_manifest(host, repository, data["version"],
+                                              package_sha256=data["package_sha256"]) == manifest_digest,
+                            "Chart tag changed while signing")
+                print(f"{target}: signed and anonymously verified {reference} as {identity}")
             except (ValueError, OSError, subprocess.CalledProcessError) as error:
                 failures.append(f"{target}: {error}")
         require(not failures, "Publication incomplete; re-run the failed publish job with its original artifact. "

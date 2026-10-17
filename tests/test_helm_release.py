@@ -139,6 +139,29 @@ class RegistryTests(unittest.TestCase):
                 {"schemaVersion": 2}, {"Docker-Content-Digest": DIGEST})):
             self.assertEqual(self.lookup(), DIGEST)
 
+    def test_signing_subject_must_bind_manifest_bytes_to_tested_chart(self):
+        manifest = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "config": {"mediaType": "application/vnd.cncf.helm.config.v1+json"},
+                    "layers": [{"mediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+                                "digest": DIGEST}]}
+        raw = json.dumps(manifest).encode()
+        expected = "sha256:" + release.hashlib.sha256(raw).hexdigest()
+        with patch.object(release, "request", return_value=response(manifest)):
+            self.assertEqual(release.registry_manifest("ghcr.io", "hugegraph/hugegraph-helm", "0.2.0",
+                                                      package_sha256="b" * 64), expected)
+        for mutate in (lambda m: m.update(mediaType="application/vnd.oci.image.index.v1+json"),
+                       lambda m: m["config"].update(mediaType="application/vnd.oci.image.config.v1+json"),
+                       lambda m: m["layers"][0].update(digest="sha256:" + "c" * 64),
+                       lambda m: m["layers"].append(copy.deepcopy(m["layers"][0]))):
+            modified = copy.deepcopy(manifest)
+            mutate(modified)
+            with patch.object(release, "request", return_value=response(modified)), self.assertRaises(ValueError):
+                release.registry_manifest("ghcr.io", "hugegraph/hugegraph-helm", "0.2.0",
+                                          package_sha256="b" * 64)
+        with patch.object(release, "request", return_value=response(manifest, {"Docker-Content-Digest": DIGEST})), \
+                self.assertRaisesRegex(ValueError, "digest does not match"):
+            release.registry_manifest("ghcr.io", "hugegraph/hugegraph-helm", "0.2.0", package_sha256="b" * 64)
+
     def test_only_explicit_oci_missing_allows_publication(self):
         for code in ("MANIFEST_UNKNOWN", "NAME_UNKNOWN"):
             with self.subTest(code=code), patch.object(release, "request", side_effect=http_error(
@@ -259,7 +282,10 @@ class BundleTests(unittest.TestCase):
         self.write_source()
         self.env = patch.dict(os.environ, {"GITHUB_OUTPUT": str(self.root / "output"),
                                           "GHCR_USERNAME": "user", "GHCR_PASSWORD": "secret",
-                                          "DOCKERHUB_USERNAME": "user", "DOCKERHUB_PASSWORD": "secret"})
+                                          "DOCKERHUB_USERNAME": "user", "DOCKERHUB_PASSWORD": "secret",
+                                          "GITHUB_WORKFLOW_REF": release.SIGNING_WORKFLOW + "@refs/heads/master",
+                                          "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/token",
+                                          "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-request-token"})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.commands = []
@@ -306,6 +332,9 @@ class BundleTests(unittest.TestCase):
         self.commands.append((args, kwargs))
         if args[:3] == ["helm", "registry", "login"]:
             Path(kwargs["env"]["HELM_REGISTRY_CONFIG"]).write_text(json.dumps({"auths": {args[3]: {}}}))
+        elif args[:2] == ["cosign", "login"]:
+            (Path(kwargs["env"]["DOCKER_CONFIG"]) / "config.json").write_text(
+                json.dumps({"auths": {args[2]: {}}}))
         elif args[:2] == ["helm", "package"]:
             metadata = yaml.safe_load((Path(args[2]) / "Chart.yaml").read_text())
             archive(Path(args[-1]) / f"hugegraph-helm-{metadata['version']}.tgz", metadata)
@@ -510,9 +539,11 @@ class BundleTests(unittest.TestCase):
 
     def test_first_publish_verifies_authenticated_and_anonymous_downloads(self):
         manifest_sha = self.seal()
-        with patch.object(release, "registry_manifest", return_value=None) as probe:
+        def probe_result(*args, **kwargs):
+            return DIGEST if "package_sha256" in kwargs else None
+        with patch.object(release, "registry_manifest", side_effect=probe_result) as probe:
             self.publish(manifest_sha)
-            self.assertEqual(probe.call_count, 2)
+            self.assertEqual(probe.call_count, 6)
             for host in ("ghcr.io", "registry-1.docker.io"):
                 probe.assert_any_call(host, "hugegraph/hugegraph-helm",
                     "0.2.0-dev.123", ("user", "secret"), actions="pull,push")
@@ -524,16 +555,35 @@ class BundleTests(unittest.TestCase):
         for pull in pulls:
             self.assertNotIn("GHCR_PASSWORD", pull["env"])
             self.assertNotIn("DOCKERHUB_PASSWORD", pull["env"])
+            self.assertFalse(set(release.OIDC_ENVIRONMENT) & set(pull["env"]))
         self.assertNotEqual(pulls[0]["env"]["HELM_REGISTRY_CONFIG"], pulls[1]["env"]["HELM_REGISTRY_CONFIG"])
         login = next(kwargs for args, kwargs in self.commands if args[:3] == ["helm", "registry", "login"])
         self.assertEqual(login["input"], "secret\n")
         self.assertFalse(any("secret" in str(args) for args, _ in self.commands))
+        signatures = [(args, kwargs) for args, kwargs in self.commands if args[:2] == ["cosign", "sign"]]
+        self.assertEqual({args[-1] for args, _ in signatures}, {
+            "ghcr.io/hugegraph/hugegraph-helm@" + DIGEST,
+            "registry-1.docker.io/hugegraph/hugegraph-helm@" + DIGEST})
+        for _, kwargs in signatures:
+            self.assertEqual(kwargs["env"]["ACTIONS_ID_TOKEN_REQUEST_TOKEN"], "oidc-request-token")
+            self.assertFalse(set(release.REGISTRY_CREDENTIALS) & set(kwargs["env"]))
+        verifications = [(args, kwargs) for args, kwargs in self.commands if args[:2] == ["cosign", "verify"]]
+        self.assertEqual(len(verifications), 2)
+        for args, kwargs in verifications:
+            self.assertEqual(args[args.index("--certificate-identity") + 1],
+                             "https://github.com/" + release.SIGNING_WORKFLOW + "@refs/heads/master")
+            self.assertEqual(args[args.index("--certificate-oidc-issuer") + 1], release.OIDC_ISSUER)
+            self.assertFalse(set(release.OIDC_ENVIRONMENT) & set(kwargs["env"]))
+            config = Path(kwargs["env"]["DOCKER_CONFIG"]) / "config.json"
+            # Temporary registry configurations are cleaned when publication finishes.
+            self.assertFalse(config.exists())
 
     def test_existing_identical_version_skips_push_and_still_checks_anonymous(self):
         manifest_sha = self.seal()
         self.publish(manifest_sha)
         self.assertFalse(any(args[:2] == ["helm", "push"] for args, _ in self.commands))
         self.assertEqual(sum(args[:2] == ["helm", "pull"] for args, _ in self.commands), 6)
+        self.assertEqual(sum(args[:2] == ["cosign", "sign"] for args, _ in self.commands), 2)
 
     def test_existing_different_package_fails_without_overwrite(self):
         manifest_sha = self.seal()
@@ -583,7 +633,9 @@ class BundleTests(unittest.TestCase):
 
     def test_partial_publication_recovers_only_missing_registry_with_original_bytes(self):
         manifest_sha = self.seal()
-        with patch.object(release, "registry_manifest", side_effect=[DIGEST, None]):
+        def probe(host, *args, **kwargs):
+            return DIGEST if host == "ghcr.io" or "package_sha256" in kwargs else None
+        with patch.object(release, "registry_manifest", side_effect=probe):
             self.publish(manifest_sha)
         pushes = [args for args, _ in self.commands if args[:2] == ["helm", "push"]]
         self.assertEqual([p[-1] for p in pushes], ["oci://registry-1.docker.io/hugegraph"])
@@ -592,6 +644,8 @@ class BundleTests(unittest.TestCase):
         manifest_sha = self.seal()
         probes = []
         def probe(host, *args, **kwargs):
+            if "package_sha256" in kwargs:
+                return DIGEST
             probes.append(host)
             return None
         def run(args, **kwargs):
@@ -638,6 +692,60 @@ class BundleTests(unittest.TestCase):
             return self.helm_run(args, **kwargs)
         with patch.object(release.subprocess, "run", side_effect=private_pull):
             with self.assertRaisesRegex(ValueError, "Publication incomplete"):
+                self.publish(manifest_sha)
+
+    def test_missing_oidc_or_unexpected_workflow_blocks_all_publication(self):
+        manifest_sha = self.seal()
+        for overrides in ({"ACTIONS_ID_TOKEN_REQUEST_TOKEN": ""},
+                          {"ACTIONS_ID_TOKEN_REQUEST_URL": ""},
+                          {"GITHUB_WORKFLOW_REF": "fork/actions/.github/workflows/publish_helm.yml@refs/heads/master"},
+                          {"GITHUB_WORKFLOW_REF": release.SIGNING_WORKFLOW + "@refs/pull/12/merge"}):
+            self.commands.clear()
+            with self.subTest(overrides=overrides), patch.dict(os.environ, overrides), self.assertRaises(ValueError):
+                self.publish(manifest_sha)
+            self.assertFalse(self.commands)
+
+    def test_signature_failure_can_recover_without_rebuilding_or_reuploading_chart(self):
+        manifest_sha = self.seal()
+        original = next(self.dist.glob("*.tgz")).read_bytes()
+        def fail_verification(args, **kwargs):
+            if args[:2] == ["cosign", "verify"] and args[2].startswith("ghcr.io/"):
+                self.assertEqual(json.loads((Path(kwargs["env"]["DOCKER_CONFIG"]) / "config.json").read_text()),
+                                 {"auths": {}})
+                raise subprocess.CalledProcessError(1, args)
+            return self.helm_run(args, **kwargs)
+        with patch.object(release.subprocess, "run", side_effect=fail_verification):
+            with self.assertRaisesRegex(ValueError, "Publication incomplete"):
+                self.publish(manifest_sha)
+        self.assertTrue(any(args[:2] == ["cosign", "sign"] and args[-1].startswith("registry-1.docker.io/")
+                            for args, _ in self.commands))
+        self.commands.clear()
+        self.publish(manifest_sha)
+        self.assertFalse(any(args[:2] in (["helm", "push"], ["helm", "package"]) for args, _ in self.commands))
+        self.assertEqual(next(self.dist.glob("*.tgz")).read_bytes(), original)
+
+    def test_changed_or_missing_manifest_cannot_be_signed(self):
+        manifest_sha = self.seal()
+        for result in (None, "sha256:" + "c" * 64):
+            self.commands.clear()
+            def probe(*args, **kwargs):
+                return result if "package_sha256" in kwargs else DIGEST
+            with self.subTest(result=result), patch.object(release, "registry_manifest", side_effect=probe):
+                with self.assertRaisesRegex(ValueError, "Publication incomplete"):
+                    self.publish(manifest_sha)
+            self.assertFalse(any(args[:2] == ["cosign", "sign"] for args, _ in self.commands))
+
+    def test_manifest_tag_change_during_signing_fails(self):
+        manifest_sha = self.seal()
+        post_probes = {}
+        def probe(host, *args, **kwargs):
+            if "package_sha256" in kwargs:
+                post_probes[host] = post_probes.get(host, 0) + 1
+                if post_probes[host] == 2:
+                    return "sha256:" + "c" * 64
+            return DIGEST
+        with patch.object(release, "registry_manifest", side_effect=probe):
+            with self.assertRaisesRegex(ValueError, "tag changed while signing"):
                 self.publish(manifest_sha)
 
 

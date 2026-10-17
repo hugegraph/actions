@@ -64,6 +64,8 @@ Tools use pinned SHA256 checksums. CI resolves component and helper images to di
 
 **Publication and recovery.** One lock per Chart/version covers both registries. Preflight checks both before uploading; differing existing content or registry errors block writes. Matching copies are skipped. Both authenticated and anonymous pulls must match the original package SHA256 and metadata. Registries have no shared transaction: a later failure can leave one published copy. **Re-run failed jobs** to complete publication with the original bundle, retained for 30 days subject to repository policy. An expired/deleted artifact fails recovery; use a new development run or source-maintained formal version.
 
+Both OCI manifest digests are signed with Cosign using an ephemeral GitHub Actions OIDC identity. Publication verifies signatures anonymously with the exact workflow identity and OIDC issuer; retries repair missing signatures while retaining the original package. Sigstore transparency logs publicly record the signing identity. An Artifact Hub **Signed** badge indicates signature presence; consumers should independently verify the expected publisher identity.
+
 **Setup.** Pre-create public Docker Hub repository `hugegraph/hugegraph-helm`; `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` need write access. GHCR uses `GITHUB_TOKEN` with `packages: write`; grant `hugegraph/actions` access to an existing package. After first upload, an administrator makes GHCR Public, then re-runs the failed publisher. Later versions work with organization-wide Public package creation disabled.
 
 Use GHCR for public CI; Docker Hub is the alternative. Select an actually published version:
@@ -72,6 +74,16 @@ Use GHCR for public CI; Docker Hub is the alternative. Select an actually publis
 helm pull oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
 helm install hugegraph oci://ghcr.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
 helm pull oci://registry-1.docker.io/hugegraph/hugegraph-helm --version 0.2.0-dev.6
+```
+
+For a version published by the workflow on `master`, verify its signature with Cosign 3.1.3:
+
+```bash
+VERSION='<signed-chart-version>' # Use a version published after signing was enabled.
+cosign verify \
+  --certificate-identity 'https://github.com/hugegraph/actions/.github/workflows/publish_helm.yml@refs/heads/master' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "ghcr.io/hugegraph/hugegraph-helm:$VERSION"
 ```
 
 Register `oci://ghcr.io/hugegraph/hugegraph-helm` in [Artifact Hub](https://artifacthub.io/docs/topics/repositories/helm-charts/).
