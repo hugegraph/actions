@@ -201,6 +201,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     concurrency:
       group: helm-publish-hugegraph-helm-${{ needs.validate.outputs.version }}
       cancel-in-progress: false
@@ -214,14 +215,14 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install PyYAML==6.0.3
-      - name: Install verified Helm
-        run: bash .github/scripts/install_helm_tools.sh
+      - name: Install verified Helm and Cosign
+        run: bash .github/scripts/install_helm_tools.sh --with-cosign
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ needs.validate.outputs.artifact_id }}
           path: dist
           merge-multiple: true
-      - name: Preflight both registries, then publish and verify the original package
+      - name: Preflight both registries, then publish, sign and verify the original package
         env:
           MANIFEST_SHA: ${{ needs.validate.outputs.manifest_sha }}
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
@@ -240,4 +241,7 @@ jobs:
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          echo "- GHCR and Docker Hub: hugegraph-helm $VERSION, authenticated and anonymous pulls match the tested package." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "- GHCR and Docker Hub: hugegraph-helm $VERSION, authenticated and anonymous pulls match the tested package."
+            echo "- Both OCI manifests have Cosign OIDC signatures, anonymously verified against https://github.com/$GITHUB_WORKFLOW_REF."
+          } >> "$GITHUB_STEP_SUMMARY"
