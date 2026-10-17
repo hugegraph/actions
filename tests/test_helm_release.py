@@ -755,6 +755,40 @@ class BundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "tag changed while signing"):
                 self.publish(manifest_sha)
 
+    def test_signature_discovery_can_lag_without_weakening_verification(self):
+        manifest_sha = self.seal()
+        attempts = {}
+        def lagging_referrers(args, **kwargs):
+            if args[:2] == ["cosign", "verify"]:
+                attempts[args[2]] = attempts.get(args[2], 0) + 1
+                if args[2].startswith("registry-1.docker.io/") and attempts[args[2]] < 3:
+                    raise subprocess.CalledProcessError(10, args)
+            return self.helm_run(args, **kwargs)
+        with patch.object(release.subprocess, "run", side_effect=lagging_referrers), \
+                patch.object(release.time, "sleep") as sleep:
+            self.publish(manifest_sha)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 15])
+        for args, _ in self.commands:
+            if args[:2] == ["cosign", "verify"]:
+                self.assertIn("--certificate-identity", args)
+                self.assertIn("--certificate-oidc-issuer", args)
+
+    def test_invalid_identity_fails_immediately_and_missing_signatures_have_a_bound(self):
+        manifest_sha = self.seal()
+        for code in (10, 12):
+            attempts = []
+            def verification_failure(args, **kwargs):
+                if args[:2] == ["cosign", "verify"]:
+                    attempts.append(args[2])
+                    raise subprocess.CalledProcessError(code, args)
+                return self.helm_run(args, **kwargs)
+            with self.subTest(code=code), patch.object(release.subprocess, "run", side_effect=verification_failure), \
+                    patch.object(release.time, "sleep") as sleep:
+                with self.assertRaisesRegex(ValueError, "Publication incomplete"):
+                    self.publish(manifest_sha)
+                self.assertEqual(len(attempts), 10 if code == 10 else 2)
+                self.assertEqual(sleep.call_count, 8 if code == 10 else 0)
+
 
 if __name__ == "__main__":
     unittest.main()

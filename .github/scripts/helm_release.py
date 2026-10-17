@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -509,9 +510,21 @@ def sign_chart(target, reference, env, anonymous, identity):
                    text=True, env=env, check=True)
     signing = dict(env, **{key: os.environ[key] for key in OIDC_ENVIRONMENT})
     subprocess.run(["cosign", "sign", "--yes", reference], env=signing, check=True)
-    subprocess.run(["cosign", "verify", reference, "--certificate-identity", identity,
-                    "--certificate-oidc-issuer", OIDC_ISSUER], env=anonymous,
-                   stdout=subprocess.DEVNULL, check=True)
+    command = ["cosign", "verify", reference, "--certificate-identity", identity,
+               "--certificate-oidc-issuer", OIDC_ISSUER]
+    # Docker Hub can acknowledge the bundle before anonymous referrer discovery sees it.
+    delays = (0, 5, 15, 30, 60)
+    for attempt, delay in enumerate(delays):
+        if delay:
+            print(f"{target}: signature not visible yet; retrying anonymous verification in {delay}s", flush=True)
+            time.sleep(delay)
+        try:
+            subprocess.run(command, env=anonymous, stdout=subprocess.DEVNULL, check=True)
+            return
+        except subprocess.CalledProcessError as error:
+            # Cosign's documented exit 10 is 'no signature'; identity/trust errors are not retried.
+            if error.returncode != 10 or attempt == len(delays) - 1:
+                raise
 
 
 def publish(dist, manifest_sha, source_sha, channel, run_number, version):
