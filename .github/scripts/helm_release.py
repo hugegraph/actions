@@ -200,7 +200,9 @@ def registry_manifest(host, repository, reference, credentials=None, actions="pu
         require(re.fullmatch("sha256:" + SHA256, result), "Registry returned an invalid manifest digest")
         if package_sha256 is not None:
             require(result == "sha256:" + hashlib.sha256(body).hexdigest(), "Manifest digest does not match its bytes")
-            require(data.get("mediaType") == "application/vnd.oci.image.manifest.v1+json"
+            # Helm 3.16 omits the optional top-level mediaType in its JSON body.
+            media_type = data.get("mediaType") or response.headers.get("Content-Type", "").split(";", 1)[0]
+            require(media_type == "application/vnd.oci.image.manifest.v1+json"
                     and data.get("config", {}).get("mediaType") == "application/vnd.cncf.helm.config.v1+json",
                     "Signing requires a Helm OCI manifest")
             layers = [layer for layer in data.get("layers", [])

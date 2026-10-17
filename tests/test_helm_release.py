@@ -149,6 +149,13 @@ class RegistryTests(unittest.TestCase):
         with patch.object(release, "request", return_value=response(manifest)):
             self.assertEqual(release.registry_manifest("ghcr.io", "hugegraph/hugegraph-helm", "0.2.0",
                                                       package_sha256="b" * 64), expected)
+        helm_manifest = copy.deepcopy(manifest)
+        del helm_manifest["mediaType"]
+        helm_digest = "sha256:" + release.hashlib.sha256(json.dumps(helm_manifest).encode()).hexdigest()
+        with patch.object(release, "request", return_value=response(helm_manifest,
+                {"Content-Type": "application/vnd.oci.image.manifest.v1+json"})):
+            self.assertEqual(release.registry_manifest("ghcr.io", "hugegraph/hugegraph-helm", "0.2.0",
+                                                      package_sha256="b" * 64), helm_digest)
         for mutate in (lambda m: m.update(mediaType="application/vnd.oci.image.index.v1+json"),
                        lambda m: m["config"].update(mediaType="application/vnd.oci.image.config.v1+json"),
                        lambda m: m["layers"][0].update(digest="sha256:" + "c" * 64),
