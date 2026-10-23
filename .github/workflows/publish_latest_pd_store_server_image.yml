@@ -8,7 +8,7 @@ on:
       source_repository:
         required: false
         default: 'apache/hugegraph'
-        description: 'Source repo owner/name'
+        description: 'Apache source; the HugeGraph fork is allowed for explicit validation'
       source_ref:
         required: false
         default: 'master'
