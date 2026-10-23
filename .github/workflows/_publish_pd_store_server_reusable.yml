@@ -1169,6 +1169,14 @@ jobs:
         # The preceding example/schema/index/CRUD checks ran on stock RocksDB.
         # Close those databases normally before changing only the image selection.
         stop_normally
+        # A normal close can retain WAL-backed metadata without creating SSTs.
+        # Stock recovery flushes that fixture to stock-format SSTs before the
+        # provider switch, without changing either image or its configuration.
+        docker compose -p hg-ci-precheck "${compose_args[@]}" \
+          -f /tmp/docker-compose.ci.rocksdb.yml up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
+        gremlin_request "[[vertices:g.V().count().next(),edges:g.E().count().next(),names:g.V().values('name').order().toList(),beijing:g.V().has('person','city','Beijing').values('name').order().toList()]]"
+        jq -e '.result.data[0] | .vertices == 6 and .edges == 6 and .names == ["josh","lop","marko","peter","ripple","vadas"] and .beijing == ["josh","marko"]' /tmp/hg-ci-switch-query.json
+        stop_normally
         pd_volume="$(data_volume hg-pd /hugegraph-pd/pd_data)"
         store_volume="$(data_volume hg-store /hugegraph-store/storage)"
         test -n "$pd_volume" && test -n "$store_volume"
