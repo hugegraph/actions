@@ -20,7 +20,7 @@ on:
       publish:
         type: boolean
         required: false
-        default: false
+        default: true
         description: 'Push images to Dockerhub'
 
 jobs:

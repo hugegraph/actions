@@ -230,6 +230,10 @@ jobs:
     needs: prepare
     if: ${{ needs.prepare.outputs.need_update == 'true' }}
     runs-on: ubuntu-latest
+    env:
+      IMAGE_LABELS: |
+        org.opencontainers.image.revision=${{ needs.prepare.outputs.source_sha }}
+        org.opencontainers.image.source=https://github.com/${{ inputs.source_repository }}
     strategy:
       fail-fast: false
       matrix:
@@ -349,6 +353,7 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: ${{ steps.params.outputs.image_url }}
+        labels: ${{ env.IMAGE_LABELS }}
         cache-from: ${{ steps.params.outputs.cache_from }}
         cache-to: ${{ steps.params.outputs.cache_to_min }}
         build-args: ${{ inputs.mvn_args }}
@@ -362,6 +367,7 @@ jobs:
         platforms: linux/amd64
         load: true
         tags: ${{ steps.params.outputs.image_url }}
+        labels: ${{ env.IMAGE_LABELS }}
         cache-from: ${{ steps.params.outputs.cache_from }}
         cache-to: ${{ steps.params.outputs.cache_to_min }}
 
@@ -392,6 +398,7 @@ jobs:
         platforms: ${{ steps.params.outputs.platforms }}
         push: ${{ needs.prepare.outputs.publish_images == 'true' }}
         tags: ${{ steps.params.outputs.image_url }}
+        labels: ${{ env.IMAGE_LABELS }}
         cache-from: ${{ steps.params.outputs.cache_from }}
         cache-to: ${{ steps.params.outputs.cache_to_max }}
         build-args: ${{ inputs.mvn_args }}
@@ -405,6 +412,7 @@ jobs:
         platforms: ${{ steps.params.outputs.platforms }}
         push: ${{ needs.prepare.outputs.publish_images == 'true' }}
         tags: ${{ steps.params.outputs.image_url }}
+        labels: ${{ env.IMAGE_LABELS }}
         cache-from: ${{ steps.params.outputs.cache_from }}
         cache-to: ${{ steps.params.outputs.cache_to_max }}
 

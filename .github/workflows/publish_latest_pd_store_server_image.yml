@@ -28,7 +28,7 @@ on:
       publish:
         type: boolean
         required: false
-        default: false
+        default: true
         description: 'Push images to Dockerhub'
       mvn_args:
         required: false
