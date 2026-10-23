@@ -328,6 +328,9 @@ jobs:
     needs: prepare
     if: ${{ needs.prepare.outputs.need_update == 'true' }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: publish-pd-store-server-${{ needs.prepare.outputs.version_tag }}
+      cancel-in-progress: false
     env:
       SOURCE_REPOSITORY: ${{ inputs.source_repository }}
       SOURCE_URL: https://github.com/${{ inputs.source_repository }}

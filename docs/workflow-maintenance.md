@@ -73,6 +73,10 @@ digests when a reproducible deployment is required.
 
 Image entry workflows define the source, Dockerfiles, platforms and component settings. Use `FROM --platform=$BUILDPLATFORM` for portable Maven/Node build stages so packaging runs natively; runtime stages use the target platform. Native libraries and architecture-specific downloads still need appropriate builds and runtime tests. See [Docker's build strategies](https://docs.docker.com/build/building/multi-platform/).
 
+The shared PD/Store/Server job locks the final image tag across latest and release
+workflows for its entire build, test, push and pull verification. Runs publishing the
+same tag cannot interleave updates to the four repositories; different tags can run independently.
+
 The Helm smoke test uses 1 PD + 1 Store + 1 Server with memory limits of 1/2/2 GiB, persistent volumes, and Hubble disabled. These limits are for CI, not production sizing. Tools are checksum-pinned and test images are resolved to digests; published Chart image values stay as defined in source.
 
 Python builds test wheel and source distributions in isolated environments. With `both`, MCP uses the client artifact from the same run before publication and the published client afterward. For TestPyPI publication, it selects the matching TestPyPI client wheel; other dependencies come from public PyPI.
