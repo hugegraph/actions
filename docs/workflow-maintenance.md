@@ -30,7 +30,74 @@ The Helm publication bundle is retained for 30 days and Python artifacts for 14 
 
 ## Build and test notes
 
+### Topling builds
+
+PD/Store/Server formal images always use `apache/hugegraph` source. The release
+wrapper checks out the selected Apache ref once and passes that immutable commit
+to both runtime variants. One dispatch publishes standard `x.y.z` and Topling
+`x.y.z-topling`; both variants require their functional checks. Scheduled latest
+runs stay standard. Select `runtime_variant=topling` in a manual latest run when
+an on-demand Topling development image is needed. Version tags use the paired
+release workflow, rather than the latest workflow.
+
+The selected source pins an immutable JNI JAR URL and SHA-256 in
+`docker/topling-runtime.env`. To validate another trusted build of
+[hugegraph/toplingdb](https://github.com/hugegraph/toplingdb/actions/workflows/topling-jni.yml),
+supply both `topling_jni_url` and `topling_jni_sha256` as overrides.
+The JAR must support `TOPLINGDB_EASY_MIGRATE_CONF`; similarly named upstream JARs may
+lack that entry point. The source distribution's `prepare-topling.sh` verifies the
+checksum, dependencies and a real configuration probe while the image is built.
+There is no native-library download at container startup.
+
+The source must provide the current `docker/bake.hcl` runtime contract. This reuses
+the same Maven build and four image repositories. Topling requires Linux amd64,
+a Haswell-compatible CPU, and a compatible glibc runtime; the Dockerfiles select
+the matching runtime base. The
+HStore Server image stays on `backend=hstore` without local Topling JNI, while PD,
+Store and the standalone Server use the prepared Topling runtime.
+
+The workflow adds `-topling` to the selected image tag once: `latest` becomes
+`latest-topling`, and release `1.8.0` becomes `1.8.0-topling`. Standard builds reject
+Topling tags. Topling runs do not read or update `LAST_SERVER_HASH`, because a source
+hash alone cannot identify the chosen native artifact.
+
+Uncheck `publish` in the latest workflow to build and test without writing images,
+registry caches or source markers. Topling requires `strict_mode=true`: publication
+checks the runtime labels and checksum receipt, verifies the loaded JNI path in PD,
+Store and standalone Server, and tests schema/graph CRUD plus persistence after a
+normal stop and restart for both standalone and 1 PD + 1 Store + 1 Server.
+The Topling publication gate also creates RocksDB data with standard images from
+the same source commit, stops them normally, and verifies the Topling images can
+read and update that data on the same persisted volumes.
+After pushing, Topling runs pull each returned immutable digest and verify its amd64
+image configuration matches the tested image, including source commit and runtime
+labels. The run summary records those verified digest references for deployment.
+
+After publication, select the image set with `HUGEGRAPH_VERSION=latest-topling` in
+the normal Compose files, or `--set global.runtimeVariant=topling` with the matching
+Helm chart. For a RocksDB-to-Topling switch, stop the existing services normally and
+back up their data, then preserve the data volumes while selecting the qualified
+Topling images. The compatibility gate covers the tested source and pinned JNI
+pair; qualify a copy of representative production data before switching. Pin
+published image digests when a reproducible deployment is required.
+
+### Fork validation
+
+Use a manual latest run with `publish=false` to build and test an allowed fork
+without registry writes. To publish temporary candidate images, select the fork
+and explicitly set an image tag beginning with `ci-`, such as `ci-<source-sha>`.
+Topling adds its normal `-topling` suffix. Candidate validation
+cannot use official version/latest tags or update `LAST_SERVER_HASH`; it cannot
+run in release mode. This facility supports cross-repository integration testing
+before the source changes reach Apache.
+
+### Shared build conventions
+
 Image entry workflows define the source, Dockerfiles, platforms and component settings. Use `FROM --platform=$BUILDPLATFORM` for portable Maven/Node build stages so packaging runs natively; runtime stages use the target platform. Native libraries and architecture-specific downloads still need appropriate builds and runtime tests. See [Docker's build strategies](https://docs.docker.com/build/building/multi-platform/).
+
+The shared PD/Store/Server job locks the final image tag across latest and release
+workflows for its entire build, test, push and pull verification. Runs publishing the
+same tag cannot interleave updates to the four repositories; different tags can run independently.
 
 The Helm smoke test uses 1 PD + 1 Store + 1 Server with memory limits of 1/2/2 GiB, persistent volumes, and Hubble disabled. These limits are for CI, not production sizing. Tools are checksum-pinned and test images are resolved to digests; published Chart image values stay as defined in source.
 
@@ -41,6 +108,7 @@ Local checks require no Docker or publication:
 ```bash
 python3 -m unittest discover -s tests -p 'test_helm*.py' -v
 bash tests/test_publish_prepare.sh
+bash tests/test_topling_artifact.sh
 actionlint .github/workflows/publish_helm.yml .github/workflows/publish_latest_*.yml
 
 uv run --no-project --python 3.11 python -m unittest discover -s tests -p 'test_python_release.py' -v
