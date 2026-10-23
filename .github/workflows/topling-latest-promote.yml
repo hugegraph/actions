@@ -1,0 +1,90 @@
+name: Promote validated Topling images
+run-name: Promote cf0422740 Topling images to latest-topling
+
+on:
+  push:
+    branches: [codex/topling-latest-promote]
+    paths:
+      - .github/workflows/topling-latest-promote.yml
+      - .github/topling-latest-promotion.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-topling-latest
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/codex/topling-latest-promote'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Verify all approved source manifests before promotion
+        run: |
+          set -euo pipefail
+          approved=.github/topling-latest-promotion.json
+          jq -e '
+            keys == ["pd","server","standalone","store"] and
+            all(to_entries[];
+              .value as $image |
+              ({pd:"hugegraph/pd",store:"hugegraph/store",server:"hugegraph/server",standalone:"hugegraph/hugegraph"}[.key]) as $repo |
+              ($image.immutable_ref | test("^" + $repo + "@sha256:[0-9a-f]{64}$")) and
+              ($image.config_id | test("^sha256:[0-9a-f]{64}$")) and
+              $image.tag == ($repo + ":ci-cf0422740-topling") and
+              $image.source_sha == "cf042274056a5f7690c75c835b63ee8c1ce25b9f" and
+              $image.actions_run_id == 39973153801 and
+              $image.actions_head_sha == "eab41a5cf140e6190773ea68f10407a6dc20a058"
+            )
+          ' "$approved"
+          jq -r '.[] | [.immutable_ref,.config_id] | @tsv' "$approved" > /tmp/topling-approved.tsv
+          test "$(wc -l < /tmp/topling-approved.tsv)" -eq 4
+          while IFS=$'\t' read -r ref config; do
+            docker buildx imagetools inspect --raw "$ref" > /tmp/topling-manifest.json
+            digest="sha256:$(sha256sum /tmp/topling-manifest.json | cut -d ' ' -f1)"
+            test "$digest" = "${ref##*@}"
+            jq -e --arg config "$config" '
+              .mediaType == "application/vnd.oci.image.manifest.v1+json" and .config.digest == $config
+            ' /tmp/topling-manifest.json
+            echo "Verified $ref and configuration $config"
+          done < /tmp/topling-approved.tsv
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Promote the approved manifests and verify target digests
+        run: |
+          set -euo pipefail
+          {
+            echo '## Topling latest promotion'
+            echo
+            echo 'Validated source: `cf042274056a5f7690c75c835b63ee8c1ce25b9f`'
+            echo
+            echo '| Target | Verified manifest digest |'
+            echo '| --- | --- |'
+          } >> "$GITHUB_STEP_SUMMARY"
+          while IFS=$'\t' read -r ref config; do
+            target="${ref%@*}:latest-topling"
+            docker buildx imagetools create --prefer-index=false --tag "$target" "$ref"
+            verified=false
+            for attempt in 1 2 3; do
+              if docker buildx imagetools inspect --raw "$target" > /tmp/topling-promoted.json; then
+                digest="sha256:$(sha256sum /tmp/topling-promoted.json | cut -d ' ' -f1)"
+                if [ "$digest" = "${ref##*@}" ]; then
+                  verified=true
+                  break
+                fi
+              fi
+              if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
+            done
+            test "$verified" = true || { echo "Target digest mismatch: $target"; exit 1; }
+            jq -e --arg config "$config" '.config.digest == $config' /tmp/topling-promoted.json
+            printf '| `%s` | `%s` |\n' "$target" "$digest" >> "$GITHUB_STEP_SUMMARY"
+          done < /tmp/topling-approved.tsv

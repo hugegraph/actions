@@ -1,0 +1,43 @@
+{
+  "pd": {
+    "immutable_ref": "hugegraph/pd@sha256:66d33c24e14b88dae2f6ba96987aa3cc3a0711baa6b04160d4c92ea81461bbdb",
+    "tag": "hugegraph/pd:ci-cf0422740-topling",
+    "actions_run_id": 39973153801,
+    "actions_run_url": "https://github.com/hugegraph/actions/actions/runs/39973153801",
+    "actions_head_sha": "eab41a5cf140e6190773ea68f10407a6dc20a058",
+    "source_sha": "cf042274056a5f7690c75c835b63ee8c1ce25b9f",
+    "config_id": "sha256:f2f28449cf32d6c536ee946dd9cdfb3f3a60447ed5c12ed2b5979c32821e86c5",
+    "runtime": "topling"
+  },
+  "store": {
+    "immutable_ref": "hugegraph/store@sha256:499693f6b777eaffdeedb51df5f09b147eeab7c358fa8868e004f679a5dce481",
+    "tag": "hugegraph/store:ci-cf0422740-topling",
+    "actions_run_id": 39973153801,
+    "actions_run_url": "https://github.com/hugegraph/actions/actions/runs/39973153801",
+    "actions_head_sha": "eab41a5cf140e6190773ea68f10407a6dc20a058",
+    "source_sha": "cf042274056a5f7690c75c835b63ee8c1ce25b9f",
+    "config_id": "sha256:a1f4f5a0b8f1d4a0cbd5c09f84f2065416e1cc61a48521d1ed60a48cf4ac0afa",
+    "runtime": "topling"
+  },
+  "server": {
+    "immutable_ref": "hugegraph/server@sha256:2bdb1b63f59020396d0046e9ab334e71d09949cda7b7031188cb2fed58800f88",
+    "tag": "hugegraph/server:ci-cf0422740-topling",
+    "actions_run_id": 39973153801,
+    "actions_run_url": "https://github.com/hugegraph/actions/actions/runs/39973153801",
+    "actions_head_sha": "eab41a5cf140e6190773ea68f10407a6dc20a058",
+    "source_sha": "cf042274056a5f7690c75c835b63ee8c1ce25b9f",
+    "config_id": "sha256:8db3073352a48e9db5243dac096c384545079dea8c789b2533fd8e57a475319f",
+    "runtime": "hstore"
+  },
+  "standalone": {
+    "immutable_ref": "hugegraph/hugegraph@sha256:862652995ad7b58a0ae365495de849cde65a4101db0d8c41276d34206880823b",
+    "tag": "hugegraph/hugegraph:ci-cf0422740-topling",
+    "actions_run_id": 39973153801,
+    "actions_run_url": "https://github.com/hugegraph/actions/actions/runs/39973153801",
+    "actions_head_sha": "eab41a5cf140e6190773ea68f10407a6dc20a058",
+    "source_sha": "cf042274056a5f7690c75c835b63ee8c1ce25b9f",
+    "config_id": "sha256:da80c55f3f31e452119acaf99f355df1ea74bdb32f0d6ca9dce57e4be2ba5912",
+    "runtime": "topling"
+  }
+}
+
