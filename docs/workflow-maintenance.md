@@ -59,6 +59,9 @@ registry caches or source markers. Topling requires `strict_mode=true`: publicat
 checks the runtime labels and checksum receipt, verifies the loaded JNI path in PD,
 Store and standalone Server, and tests schema/graph CRUD plus persistence after a
 normal stop and restart for both standalone and 1 PD + 1 Store + 1 Server.
+After pushing, Topling runs pull each returned immutable digest and verify its amd64
+image configuration matches the tested image, including source commit and runtime
+labels. The run summary records those verified digest references for deployment.
 
 After publication, select the image set with `HUGEGRAPH_VERSION=latest-topling` in
 the normal Compose files, or `--set global.runtimeVariant=topling` with the matching

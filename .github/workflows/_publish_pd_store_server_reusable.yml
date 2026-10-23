@@ -1203,11 +1203,14 @@ jobs:
       if: ${{ success() && needs.prepare.outputs.publish_images == 'true' }}
       run: |
         set -euo pipefail
+        : > /tmp/hg-ci-published-images.tsv
         for image in "$PD_IMAGE" "$STORE_IMAGE" "$HSTORE_IMAGE" "$STANDALONE_IMAGE"; do
+          tested_id="$(docker image inspect --platform linux/amd64 --format '{{.Id}}' "$image")"
+          push_log="$(mktemp /tmp/hg-ci-push.XXXXXX)"
           pushed="false"
           for attempt in 1 2 3; do
             echo "Pushing tested multi-platform candidate ${image} (attempt ${attempt}/3)"
-            if docker push "$image"; then
+            if docker push "$image" 2>&1 | tee "$push_log"; then
               pushed="true"
               break
             fi
@@ -1217,7 +1220,57 @@ jobs:
             echo "Failed to push ${image} after 3 attempts"
             exit 1
           fi
+          if [ "$RUNTIME_VARIANT" = "topling" ]; then
+            digest="$(sed -nE 's/^.*digest: (sha256:[0-9a-f]{64}).*$/\1/p' "$push_log" | tail -1)"
+            if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "Push did not return a manifest digest for $image"
+              exit 1
+            fi
+            printf '%s\t%s\t%s\n' "$image" "$tested_id" "$digest" >> /tmp/hg-ci-published-images.tsv
+          fi
+          rm "$push_log"
         done
+
+    - name: Pull and verify published Topling digests
+      if: ${{ success() && inputs.runtime_variant == 'topling' && needs.prepare.outputs.publish_images == 'true' }}
+      run: |
+        set -euo pipefail
+        test "$(wc -l < /tmp/hg-ci-published-images.tsv)" -eq 4
+        {
+          echo
+          echo "## Published Topling images"
+          echo
+          echo '| Tested tag | Pulled immutable reference |'
+          echo '| --- | --- |'
+        } >> "$GITHUB_STEP_SUMMARY"
+        while IFS=$'\t' read -r image tested_id digest; do
+          digest_ref="${image%:*}@${digest}"
+          pulled=false
+          for attempt in 1 2 3; do
+            if docker pull --platform linux/amd64 "$digest_ref"; then
+              pulled=true
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
+          done
+          if [ "$pulled" != true ]; then
+            echo "Unable to pull published digest: $digest_ref"
+            exit 1
+          fi
+          docker image inspect --platform linux/amd64 "$digest_ref" > /tmp/hg-ci-pulled-image.json
+          runtime=topling
+          if [ "$image" = "$HSTORE_IMAGE" ]; then runtime=hstore; fi
+          jq -e --arg id "$tested_id" --arg source "$SOURCE_URL" \
+            --arg revision "$SOURCE_SHA" --arg runtime "$runtime" '
+            .[0] | .Id == $id and .Os == "linux" and .Architecture == "amd64" and
+            .Config.Labels["org.opencontainers.image.source"] == $source and
+            .Config.Labels["org.opencontainers.image.revision"] == $revision and
+            .Config.Labels["org.apache.hugegraph.rocksdb-runtime"] == $runtime
+          ' /tmp/hg-ci-pulled-image.json
+          repo_digest="$(jq -er --arg digest "@$digest" \
+            '.[0].RepoDigests | map(select(endswith($digest))) | first' /tmp/hg-ci-pulled-image.json)"
+          printf '| `%s` | `%s` |\n' "$image" "$repo_digest" >> "$GITHUB_STEP_SUMMARY"
+        done < /tmp/hg-ci-published-images.tsv
 
     - name: Cleanup standalone container
       if: ${{ always() }}
