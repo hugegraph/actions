@@ -1,5 +1,5 @@
 name: Verify Topling candidate publication
-run-name: Topling candidate ci-cf0422740 from cf0422740
+run-name: Topling compatibility candidate ci-58e974591 from 58e974591
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: topling-ci-verify-ci-cf0422740
+  group: topling-ci-verify-ci-58e974591
   cancel-in-progress: false
 
 jobs:
@@ -20,8 +20,8 @@ jobs:
       runtime_variant: topling
       source_repository: hugegraph/hugegraph
       allowed_source_repositories: apache/hugegraph,hugegraph/hugegraph
-      source_ref: cf042274056a5f7690c75c835b63ee8c1ce25b9f
-      image_tag: ci-cf0422740
+      source_ref: 58e974591c3fc105215390f79182d9cd552b036b
+      image_tag: ci-58e974591
       publish: true
       strict_mode: true
       dry_run: false
