@@ -1,0 +1,30 @@
+name: Verify Topling candidate publication
+run-name: Topling candidate ci-cf0422740 from cf0422740
+
+on:
+  push:
+    branches: [codex/topling-ci-verify]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: topling-ci-verify-ci-cf0422740
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    uses: ./.github/workflows/_publish_pd_store_server_reusable.yml
+    with:
+      mode: latest
+      runtime_variant: topling
+      source_repository: hugegraph/hugegraph
+      allowed_source_repositories: apache/hugegraph,hugegraph/hugegraph
+      source_ref: cf042274056a5f7690c75c835b63ee8c1ce25b9f
+      image_tag: ci-cf0422740
+      publish: true
+      strict_mode: true
+      dry_run: false
+      wait_timeout_sec: '600'
+      enable_hash_gate: false
+    secrets: inherit
