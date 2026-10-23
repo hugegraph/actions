@@ -9,6 +9,7 @@ Its main purpose is to publish Docker images, validate releases, and host small 
 
 - `latest` publishing is the automated path: scheduled or manually triggered, with hash gating to skip unchanged sources.
 - `release` publishing is the manual path: it publishes from a versioned branch and should run even if the source is unchanged.
+- PD/Store/Server releases publish standard and Topling variants from one resolved Apache commit; fork candidates require explicit `ci-*` validation mode.
 - Most image publishers share [`.github/workflows/_publish_image_reusable.yml`](./.github/workflows/_publish_image_reusable.yml).
 - `pd/store/server` uses [`.github/workflows/_publish_pd_store_server_reusable.yml`](./.github/workflows/_publish_pd_store_server_reusable.yml) with a strict precheck and single-job multi-platform publication flow.
 - Compatible source revisions provide `docker/bake.hcl` so one native Maven stage feeds all four runtime images; older revisions use the serial compatibility path.

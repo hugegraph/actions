@@ -3,23 +3,14 @@ name: "Publish pd-store-server image(release)"
 on:
   workflow_dispatch:
     inputs:
-      source_repository:
-        required: false
-        default: 'apache/hugegraph'
-        description: 'source repository in owner/name format'
       source_ref:
         required: true
         default: 'master'
-        description: 'source branch, tag, or commit used to build the release images'
+        description: 'Apache HugeGraph branch, tag, or commit resolved once for both variants'
       image_tag:
         required: true
         default: ''
         description: 'image version tag, for example 1.7.0'
-      runtime_variant:
-        type: choice
-        options: [standard, topling]
-        default: standard
-        description: 'RocksDB runtime (Topling is amd64 only; adds -topling to image tag)'
       topling_jni_url:
         required: false
         default: ''
@@ -32,11 +23,6 @@ on:
         required: false
         default: ''
         description: 'Docker build args, one NAME=VALUE entry per line'
-      strict_mode:
-        type: boolean
-        required: false
-        default: true
-        description: 'whether integration precheck is mandatory before publish'
       wait_timeout_sec:
         required: false
         default: '300'
@@ -47,20 +33,50 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resolve_source:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - name: Resolve Apache release source once
+        uses: actions/checkout@v7
+        with:
+          repository: apache/hugegraph
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - name: Record immutable source commit
+        id: source
+        env:
+          RELEASE_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RELEASE_IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release image_tag must be x.y.z for the paired runtime variants"
+            exit 1
+          fi
+          source_sha="$(git rev-parse HEAD)"
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
   publish:
+    needs: resolve_source
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime_variant: [standard, topling]
     uses: ./.github/workflows/_publish_pd_store_server_reusable.yml
     with:
-      runtime_variant: ${{ inputs.runtime_variant || 'standard' }}
+      runtime_variant: ${{ matrix.runtime_variant }}
       topling_jni_url: ${{ inputs.topling_jni_url || '' }}
       topling_jni_sha256: ${{ inputs.topling_jni_sha256 || '' }}
       mode: release
-      source_repository: ${{ inputs.source_repository || 'apache/hugegraph' }}
-      allowed_source_repositories: apache/hugegraph,hugegraph/hugegraph
-      source_ref: ${{ inputs.source_ref }}
+      source_repository: apache/hugegraph
+      allowed_source_repositories: apache/hugegraph
+      source_ref: ${{ needs.resolve_source.outputs.source_sha }}
       image_tag: ${{ inputs.image_tag }}
       publish: true
       mvn_args: ${{ inputs.mvn_args }}
-      strict_mode: ${{ inputs.strict_mode }}
+      strict_mode: true
       wait_timeout_sec: ${{ inputs.wait_timeout_sec || '300' }}
       enable_hash_gate: false
     secrets: inherit

@@ -169,6 +169,27 @@ jobs:
           echo "dry_run is only supported by latest mode"
           exit 1
         fi
+        if [ "$SOURCE_REPOSITORY" != "apache/hugegraph" ]; then
+          ENABLE_HASH_GATE=false
+        fi
+        if [ "$MODE" = "release" ]; then
+          if [ "$SOURCE_REPOSITORY" != "apache/hugegraph" ] \
+            || ! [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "Release requires one resolved apache/hugegraph commit SHA for both variants"
+            exit 1
+          fi
+        elif [ "$PUBLISH" = "true" ] && [ "$DRY_RUN" != "true" ]; then
+          if [ "$SOURCE_REPOSITORY" != "apache/hugegraph" ]; then
+            if ! [[ "$REQUESTED_IMAGE_TAG" =~ ^ci-[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+              echo "Official images require apache/hugegraph; fork publication requires an explicit ci-* tag"
+              exit 1
+            fi
+          fi
+          if [[ "$REQUESTED_IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version tags must use the paired Apache release workflow"
+            exit 1
+          fi
+        fi
 
         source_repository_allowed="false"
         IFS=',' read -ra allowed_repositories <<< "$ALLOWED_SOURCE_REPOSITORIES"
@@ -201,18 +222,19 @@ jobs:
         fi
 
         source_url="https://github.com/${SOURCE_REPOSITORY}.git"
-        source_sha="$(git ls-remote "$source_url" "refs/heads/${SOURCE_REF}" \
-          | awk 'NR == 1 { print $1 }')"
-        if [ -z "$source_sha" ]; then
-          source_sha="$(git ls-remote "$source_url" "refs/tags/${SOURCE_REF}^{}" \
+        if [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          source_sha="${SOURCE_REF,,}"
+        else
+          source_sha="$(git ls-remote "$source_url" "refs/heads/${SOURCE_REF}" \
             | awk 'NR == 1 { print $1 }')"
-        fi
-        if [ -z "$source_sha" ]; then
-          source_sha="$(git ls-remote "$source_url" "refs/tags/${SOURCE_REF}" \
-            | awk 'NR == 1 { print $1 }')"
-        fi
-        if [ -z "$source_sha" ] && [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-          source_sha="$SOURCE_REF"
+          if [ -z "$source_sha" ]; then
+            source_sha="$(git ls-remote "$source_url" "refs/tags/${SOURCE_REF}^{}" \
+              | awk 'NR == 1 { print $1 }')"
+          fi
+          if [ -z "$source_sha" ]; then
+            source_sha="$(git ls-remote "$source_url" "refs/tags/${SOURCE_REF}" \
+              | awk 'NR == 1 { print $1 }')"
+          fi
         fi
         if [ -z "$source_sha" ]; then
           echo "Failed to resolve source SHA for ${SOURCE_REPOSITORY}@${SOURCE_REF}"
@@ -736,6 +758,40 @@ jobs:
         done
         test "$(docker image inspect --format '{{index .Config.Labels "org.apache.hugegraph.rocksdb-runtime"}}' "$HSTORE_IMAGE")" = hstore
 
+    - name: Build stock RocksDB images for compatibility seeding
+      if: ${{ inputs.runtime_variant == 'topling' }}
+      env:
+        SOURCE_REVISION: ${{ needs.prepare.outputs.source_sha }}
+      run: |
+        set -euo pipefail
+        seed_tag="ci-rocksdb-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        # Reuse this source's Maven stages and completed Bake cache. Seed images
+        # stay local and need only the architecture used by the functional tests.
+        bake_command=(docker buildx bake --file docker/bake.hcl --progress=plain
+          --set '*.platform=linux/amd64')
+        while IFS= read -r build_arg; do
+          if [ -n "$build_arg" ]; then
+            bake_command+=(--set "*.args.${build_arg%%=*}=${build_arg#*=}")
+          fi
+        done <<< "$MVN_ARGS"
+        unset TOPLING_JNI_URL TOPLING_JNI_SHA256
+        RUNTIME_VARIANT=standard IMAGE_TAG="$seed_tag" EXPORT_CACHE=false \
+          "${bake_command[@]}" pd store server-standalone
+        for component in pd store hugegraph; do
+          image="hugegraph/$component:$seed_tag"
+          docker image inspect --platform linux/amd64 "$image" \
+            | jq -e --arg source "$SOURCE_URL" --arg revision "$SOURCE_SHA" '
+              .[0].Config.Labels |
+              .["org.opencontainers.image.source"] == $source and
+              .["org.opencontainers.image.revision"] == $revision and
+              .["org.apache.hugegraph.rocksdb-runtime"] == "standard"'
+        done
+        {
+          echo "STANDARD_PD_IMAGE=hugegraph/pd:$seed_tag"
+          echo "STANDARD_STORE_IMAGE=hugegraph/store:$seed_tag"
+          echo "STANDARD_STANDALONE_IMAGE=hugegraph/hugegraph:$seed_tag"
+        } >> "$GITHUB_ENV"
+
     - name: Start compose stack with local images
       if: ${{ inputs.strict_mode }}
       run: |
@@ -743,6 +799,11 @@ jobs:
         echo "::add-mask::$HUGEGRAPH_ADMIN_PASSWORD"
         echo "HUGEGRAPH_ADMIN_PASSWORD=$HUGEGRAPH_ADMIN_PASSWORD" >> "$GITHUB_ENV"
         export HUGEGRAPH_ADMIN_PASSWORD
+
+        HUGEGRAPH_AUTH_TOKEN_SECRET="$(openssl rand -hex 32)"
+        echo "::add-mask::$HUGEGRAPH_AUTH_TOKEN_SECRET"
+        echo "HUGEGRAPH_AUTH_TOKEN_SECRET=$HUGEGRAPH_AUTH_TOKEN_SECRET" >> "$GITHUB_ENV"
+        export HUGEGRAPH_AUTH_TOKEN_SECRET
 
         # The HStore topology requires the PD REST secret during interpolation,
         # so every later compose command (logs, down) needs it too. Older source
@@ -915,14 +976,24 @@ jobs:
         if [ -n "$compose_dev_file" ]; then
           compose_args+=(-f "$compose_dev_file")
         fi
+        if [ "$RUNTIME_VARIANT" = topling ]; then
+          cat > /tmp/docker-compose.ci.rocksdb.yml <<ROCKSDB_OVERRIDE
+        services:
+          pd:
+            image: ${STANDARD_PD_IMAGE}
+          store:
+            image: ${STANDARD_STORE_IMAGE}
+        ROCKSDB_OVERRIDE
+          compose_args+=(-f /tmp/docker-compose.ci.override.yml -f /tmp/docker-compose.ci.rocksdb.yml)
+        else
+          compose_args+=(-f /tmp/docker-compose.ci.override.yml)
+        fi
         docker compose \
           -p hg-ci-precheck \
           "${compose_args[@]}" \
-          -f /tmp/docker-compose.ci.override.yml \
-          up -d --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
+          up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
 
-        docker compose -p hg-ci-precheck "${compose_args[@]}" \
-          -f /tmp/docker-compose.ci.override.yml ps
+        docker compose -p hg-ci-precheck "${compose_args[@]}" ps
 
     - name: Verify CI resource limits
       if: ${{ inputs.strict_mode }}
@@ -964,18 +1035,17 @@ jobs:
         curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8520/v1/health" >/dev/null
         curl -fsS --connect-timeout 3 --max-time 8 "http://127.0.0.1:8080/versions" >/dev/null
 
-    - name: Verify selected Topling native libraries
+    - name: Verify stock RocksDB seed runtimes
       if: ${{ inputs.runtime_variant == 'topling' }}
       run: |
         set -euo pipefail
         for component in pd store; do
           docker exec "hg-$component" bash -euc '
-            cd "/hugegraph-$1/topling"
-            sha256sum -c easy-migrate.sha256
-            test "$(sha256sum rocksdbjni.jar | cut -d " " -f1)" = "${2,,}"
+            test ! -d "/hugegraph-$1/topling"
             pid=$(pgrep -o -x java)
-            grep -F "/hugegraph-$1/topling/librocksdbjni-linux64.so" "/proc/$pid/maps"
-          ' -- "$component" "$TOPLING_JNI_SHA256"
+            grep -F librocksdbjni "/proc/$pid/maps"
+            ! grep -F /topling/ "/proc/$pid/maps"
+          ' -- "$component"
         done
         docker exec hg-server bash -euc '
           test ! -d /hugegraph-server/topling
@@ -1063,7 +1133,7 @@ jobs:
 
         docker stats --no-stream hg-pd hg-store hg-server
 
-    - name: Verify Topling distributed restart persistence
+    - name: Switch existing distributed RocksDB data to Topling
       if: ${{ inputs.runtime_variant == 'topling' }}
       run: |
         set -euo pipefail
@@ -1072,20 +1142,82 @@ jobs:
           compose_args+=(-f "$COMPOSE_DEV_FILE")
         fi
         compose_args+=(-f /tmp/docker-compose.ci.override.yml)
-        # Normal stop closes PD and Store databases; keep the same named volumes.
-        docker compose -p hg-ci-precheck "${compose_args[@]}" stop -t 60
-        for container in hg-pd hg-store hg-server; do
-          test "$(docker inspect --format '{{.State.OOMKilled}}' "$container")" = false
-          case "$(docker inspect --format '{{.State.ExitCode}}' "$container")" in
-            0|143) ;; *) echo "$container did not stop normally"; exit 1 ;;
-          esac
+
+        stop_normally() {
+          docker compose -p hg-ci-precheck "${compose_args[@]}" stop -t 60
+          for container in hg-pd hg-store hg-server; do
+            test "$(docker inspect --format '{{.State.OOMKilled}}' "$container")" = false
+            case "$(docker inspect --format '{{.State.ExitCode}}' "$container")" in
+              0|143) ;; *) echo "$container did not stop normally"; exit 1 ;;
+            esac
+          done
+        }
+        data_volume() {
+          docker inspect --format \
+            '{{range .Mounts}}{{if eq .Destination "'"$2"'"}}{{.Name}}{{end}}{{end}}' "$1"
+        }
+        gremlin_request() {
+          local payload
+          payload="$(jq -nc --arg gremlin "$1" \
+            '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",aliases:{graph:"DEFAULT-hugegraph",g:"__g_DEFAULT-hugegraph"}}')"
+          curl --fail-with-body -sS --max-time 30 --user "admin:$HUGEGRAPH_ADMIN_PASSWORD" \
+            -H 'Content-Type: application/json' --data-binary "$payload" http://127.0.0.1:8080/gremlin \
+            | tee /tmp/hg-ci-switch-query.json
+          jq -e '.status.code == 200' /tmp/hg-ci-switch-query.json >/dev/null
+        }
+
+        # The preceding example/schema/index/CRUD checks ran on stock RocksDB.
+        # Close those databases normally before changing only the image selection.
+        stop_normally
+        pd_volume="$(data_volume hg-pd /hugegraph-pd/pd_data)"
+        store_volume="$(data_volume hg-store /hugegraph-store/storage)"
+        test -n "$pd_volume" && test -n "$store_volume"
+        # Inspect after normal shutdown. Store must have business-partition SSTs,
+        # not only its metadata files; PD's SSTs contain the cluster metadata.
+        for component in pd store; do
+          if [ "$component" = pd ]; then
+            volume="$pd_volume"; image="$STANDARD_PD_IMAGE"; sst_root=/data
+          else
+            volume="$store_volume"; image="$STANDARD_STORE_IMAGE"; sst_root=/data/db
+          fi
+          docker run --pull=never --rm --entrypoint bash \
+            --mount "type=volume,src=$volume,dst=/data,readonly" "$image" \
+            -euc 'find "$1" -type f -name "*.sst" -printf "%s %p\n";
+                   find "$1" -type f -name "*.sst" -print -quit | grep -q .' -- "$sst_root"
         done
+        # Omitting the seed-image override selects the Topling candidates. Compose
+        # recreates changed containers and retains the same named data/WAL volumes.
         docker compose -p hg-ci-precheck "${compose_args[@]}" up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
-        payload="$(jq -nc --arg gremlin "[[vertices:g.V().count().next(),edges:g.E().count().next(),names:g.V().values('name').order().toList()]]" \
-          '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",aliases:{graph:"DEFAULT-hugegraph",g:"__g_DEFAULT-hugegraph"}}')"
-        curl --fail-with-body -sS --max-time 30 --user "admin:$HUGEGRAPH_ADMIN_PASSWORD" \
-          -H 'Content-Type: application/json' --data-binary "$payload" http://127.0.0.1:8080/gremlin \
-          | jq -e '.status.code == 200 and .result.data[0].vertices == 6 and .result.data[0].edges == 6 and .result.data[0].names == ["josh","lop","marko","peter","ripple","vadas"]'
+        test "$(data_volume hg-pd /hugegraph-pd/pd_data)" = "$pd_volume"
+        test "$(data_volume hg-store /hugegraph-store/storage)" = "$store_volume"
+        for component in pd store; do
+          docker exec "hg-$component" bash -euc '
+            cd "/hugegraph-$1/topling"
+            sha256sum -c easy-migrate.sha256
+            test "$(sha256sum rocksdbjni.jar | cut -d " " -f1)" = "${2,,}"
+            pid=$(pgrep -o -x java)
+            grep -F "/hugegraph-$1/topling/librocksdbjni-linux64.so" "/proc/$pid/maps"
+          ' -- "$component" "$TOPLING_JNI_SHA256"
+        done
+        docker exec hg-server bash -euc '
+          test ! -d /hugegraph-server/topling
+          grep -Eq "^backend[[:space:]]*=[[:space:]]*hstore" /hugegraph-server/conf/graphs/hugegraph.properties
+        '
+        gremlin_request "[[vertices:g.V().count().next(),edges:g.E().count().next(),names:g.V().values('name').order().toList(),beijing:g.V().has('person','city','Beijing').values('name').order().toList(),created:g.V().has('person','name','marko').out('created').values('name').toList()]]"
+        jq -e '.result.data[0] | .vertices == 6 and .edges == 6 and .names == ["josh","lop","marko","peter","ripple","vadas"] and .beijing == ["josh","marko"] and .created == ["lop"]' /tmp/hg-ci-switch-query.json
+
+        # Continue normal graph and index writes using the previously created schema.
+        gremlin_request "ci=graph.addVertex(T.label,'person','name','ci_after_switch','age',42,'city','Topling');g.V().has('person','name','marko').next().addEdge('knows',ci,'date','ci','weight',0.2d);graph.tx().commit();g.V().has('person','city','Topling').values('age').next()"
+        jq -e '.result.data == [42]' /tmp/hg-ci-switch-query.json
+        gremlin_request "g.V().has('person','name','ci_after_switch').property('age',43).iterate();graph.tx().commit();g.V().has('person','city','Topling').values('age').next()"
+        jq -e '.result.data == [43]' /tmp/hg-ci-switch-query.json
+        stop_normally
+        docker compose -p hg-ci-precheck "${compose_args[@]}" up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SEC"
+        gremlin_request "[[vertices:g.V().count().next(),edges:g.E().count().next(),age:g.V().has('person','city','Topling').values('age').next()]]"
+        jq -e '.result.data[0] | .vertices == 7 and .edges == 7 and .age == 43' /tmp/hg-ci-switch-query.json
+        gremlin_request "ci=g.V().has('person','name','ci_after_switch').next();g.V(ci).bothE().drop().iterate();g.V(ci).drop().iterate();graph.tx().commit();[[vertices:g.V().count().next(),edges:g.E().count().next()]]"
+        jq -e '.result.data[0] | .vertices == 6 and .edges == 6' /tmp/hg-ci-switch-query.json
+        echo 'Stock RocksDB SSTs reopened with Topling; schema, indexes, CRUD and restart persistence passed'
 
     - name: Dump compose logs on failure
       if: ${{ failure() && inputs.strict_mode }}
@@ -1170,10 +1302,66 @@ jobs:
             | tee /tmp/hg-ci-standalone-query.json
           jq -e '.status.code == 200' /tmp/hg-ci-standalone-query.json >/dev/null
         }
-        docker run --pull=never -d --name=hg-ci-standalone -p 18080:8080 \
-          -e JAVA_OPTS='-Xms256m -Xmx512m -XX:ActiveProcessorCount=4' "$STANDALONE_IMAGE"
+        verify_payloads() {
+          standalone_query "samples=[0,31,63].collect{i->b=new byte[49152];new java.util.Random(4200L+i).nextBytes(b);expected=java.util.Base64.getEncoder().encodeToString(b);actual=g.V().has('ci_payload','ci_age',i).values('ci_payload').next();[key:i,matches:actual==expected,length:actual.length()]};[[count:g.V().hasLabel('ci_payload').count().next(),samples:samples]]"
+          jq -e '.result.data[0] | .count == 64 and (.samples | length) == 3 and all(.samples[]; .matches and .length == 65536)' /tmp/hg-ci-standalone-query.json
+        }
+        stop_standalone_normally() {
+          docker stop -t 60 hg-ci-standalone
+          test "$(docker inspect --format '{{.State.OOMKilled}}' hg-ci-standalone)" = false
+          case "$(docker inspect --format '{{.State.ExitCode}}' hg-ci-standalone)" in
+            0|143) ;; *) echo "Standalone Server did not stop normally"; exit 1 ;;
+          esac
+        }
+        run_args=(--pull=never -d --name=hg-ci-standalone -p 18080:8080
+          -e JAVA_OPTS='-Xms256m -Xmx512m -XX:ActiveProcessorCount=4')
+        seed_image="$STANDALONE_IMAGE"
+        if [ "$RUNTIME_VARIANT" = topling ]; then
+          STANDALONE_DATA_VOLUME="hg-ci-standalone-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker volume create "$STANDALONE_DATA_VOLUME"
+          echo "STANDALONE_DATA_VOLUME=$STANDALONE_DATA_VOLUME" >> "$GITHUB_ENV"
+          run_args+=(--mount "type=volume,src=$STANDALONE_DATA_VOLUME,dst=/hugegraph-server/rocksdb-data")
+          seed_image="$STANDARD_STANDALONE_IMAGE"
+        fi
+        if [ "$RUNTIME_VARIANT" = topling ]; then
+          # Fixture-only configuration lives in the seed container's writable
+          # layer. Published images and the Topling candidate retain their defaults.
+          docker run "${run_args[@]}" "$seed_image" bash -euc '
+            sed -Ei "/^[[:space:]]*rocksdb[.](write_buffer_size|min_write_buffer_number_to_merge)[[:space:]]*=/d" conf/graphs/hugegraph.properties
+            printf "rocksdb.write_buffer_size=1048576\nrocksdb.min_write_buffer_number_to_merge=1\n" >> conf/graphs/hugegraph.properties
+            exec ./docker-entrypoint.sh
+          '
+        else
+          docker run "${run_args[@]}" "$seed_image"
+        fi
         wait_standalone
         if [ "$RUNTIME_VARIANT" = "topling" ]; then
+          docker exec hg-ci-standalone bash -euc '
+            test ! -d /hugegraph-server/topling
+            pid=$(pgrep -o -x java)
+            grep -F librocksdbjni "/proc/$pid/maps"
+            ! grep -F /topling/ "/proc/$pid/maps"
+          '
+          standalone_query "s=graph.schema();s.propertyKey('ci_name').asText().ifNotExist().create();s.propertyKey('ci_age').asInt().ifNotExist().create();s.vertexLabel('ci_person').properties('ci_name','ci_age').primaryKeys('ci_name').ifNotExist().create();s.indexLabel('ci_personByAge').onV('ci_person').by('ci_age').range().ifNotExist().create();s.edgeLabel('ci_knows').sourceLabel('ci_person').targetLabel('ci_person').ifNotExist().create();a=graph.addVertex(T.label,'ci_person','ci_name','alice','ci_age',40);b=graph.addVertex(T.label,'ci_person','ci_name','bob','ci_age',41);a.addEdge('ci_knows',b);graph.tx().commit();g.V().hasLabel('ci_person').count().next()"
+          jq -e '.result.data == [2]' /tmp/hg-ci-standalone-query.json
+          standalone_query "s=graph.schema();s.propertyKey('ci_payload').asText().ifNotExist().create();s.vertexLabel('ci_payload').properties('ci_age','ci_payload').primaryKeys('ci_age').ifNotExist().create();'payload_schema_ready'"
+          # Four MiB of random text crosses the seed's one-MiB vertex memtable
+          # several times. Samples cover early SST-backed and later WAL-backed data.
+          for batch in 0 1 2 3; do
+            first=$((batch * 16))
+            last=$((first + 16))
+            standalone_query "($first..<$last).each{i->b=new byte[49152];new java.util.Random(4200L+i).nextBytes(b);graph.addVertex(T.label,'ci_payload','ci_age',i,'ci_payload',java.util.Base64.getEncoder().encodeToString(b))};graph.tx().commit();g.V().hasLabel('ci_payload').count().next()"
+            jq -e --argjson count "$last" '.result.data == [$count]' /tmp/hg-ci-standalone-query.json
+          done
+          verify_payloads
+          stop_standalone_normally
+          docker run --pull=never --rm --entrypoint bash \
+            --mount "type=volume,src=$STANDALONE_DATA_VOLUME,dst=/data,readonly" "$seed_image" \
+            -euc 'find /data/data/g -type f -name "*.sst" -printf "%s %p\n";
+                   find /data/data/g -type f -name "*.sst" -size +256k -print -quit | grep -q .'
+          docker rm hg-ci-standalone
+          docker run "${run_args[@]}" "$STANDALONE_IMAGE"
+          wait_standalone
           docker exec hg-ci-standalone bash -euc '
             cd /hugegraph-server/topling
             sha256sum -c easy-migrate.sha256
@@ -1181,21 +1369,24 @@ jobs:
             pid=$(pgrep -o -x java)
             grep -F /hugegraph-server/topling/librocksdbjni-linux64.so "/proc/$pid/maps"
           ' -- "$TOPLING_JNI_SHA256"
-          standalone_query "s=graph.schema();s.propertyKey('ci_name').asText().ifNotExist().create();s.propertyKey('ci_age').asInt().ifNotExist().create();s.vertexLabel('ci_person').properties('ci_name','ci_age').primaryKeys('ci_name').ifNotExist().create();s.edgeLabel('ci_knows').sourceLabel('ci_person').targetLabel('ci_person').ifNotExist().create();a=graph.addVertex(T.label,'ci_person','ci_name','alice','ci_age',40);b=graph.addVertex(T.label,'ci_person','ci_name','bob','ci_age',41);a.addEdge('ci_knows',b);graph.tx().commit();g.V().hasLabel('ci_person').count().next()"
-          jq -e '.result.data == [2]' /tmp/hg-ci-standalone-query.json
+          standalone_query "[[vertices:g.V().hasLabel('ci_person').count().next(),edges:g.E().hasLabel('ci_knows').count().next(),ages:g.V().has('ci_person','ci_age',P.gte(40)).values('ci_age').order().toList()]]"
+          jq -e '.result.data[0] | .vertices == 2 and .edges == 1 and .ages == [40,41]' /tmp/hg-ci-standalone-query.json
+          verify_payloads
           standalone_query "g.V().has('ci_person','ci_name','alice').property('ci_age',42).iterate();graph.tx().commit();g.V().has('ci_person','ci_name','alice').values('ci_age').next()"
           jq -e '.result.data == [42]' /tmp/hg-ci-standalone-query.json
-          docker stop -t 60 hg-ci-standalone
-          test "$(docker inspect --format '{{.State.OOMKilled}}' hg-ci-standalone)" = false
-          case "$(docker inspect --format '{{.State.ExitCode}}' hg-ci-standalone)" in
-            0|143) ;; *) echo "Standalone Server did not stop normally"; exit 1 ;;
-          esac
+          standalone_query "c=graph.addVertex(T.label,'ci_person','ci_name','charlie','ci_age',43);g.V().has('ci_person','ci_name','alice').next().addEdge('ci_knows',c);graph.tx().commit();g.V().has('ci_person','ci_age',P.gte(42)).count().next()"
+          jq -e '.result.data == [2]' /tmp/hg-ci-standalone-query.json
+          stop_standalone_normally
           docker start hg-ci-standalone
           wait_standalone
-          standalone_query "[[age:g.V().has('ci_person','ci_name','alice').values('ci_age').next(),edges:g.E().hasLabel('ci_knows').count().next()]]"
-          jq -e '.result.data[0].age == 42 and .result.data[0].edges == 1' /tmp/hg-ci-standalone-query.json
+          standalone_query "[[age:g.V().has('ci_person','ci_name','alice').values('ci_age').next(),vertices:g.V().hasLabel('ci_person').count().next(),edges:g.E().hasLabel('ci_knows').count().next(),indexed:g.V().has('ci_person','ci_age',P.gte(42)).count().next()]]"
+          jq -e '.result.data[0] | .age == 42 and .vertices == 3 and .edges == 2 and .indexed == 2' /tmp/hg-ci-standalone-query.json
+          verify_payloads
           standalone_query "g.V().hasLabel('ci_person').drop().iterate();graph.tx().commit();g.V().hasLabel('ci_person').count().next()"
           jq -e '.result.data == [0]' /tmp/hg-ci-standalone-query.json
+          standalone_query "g.V().hasLabel('ci_payload').drop().iterate();graph.tx().commit();g.V().hasLabel('ci_payload').count().next()"
+          jq -e '.result.data == [0]' /tmp/hg-ci-standalone-query.json
+          echo 'Standalone stock RocksDB SSTs reopened with Topling; schema, index, CRUD and restart persistence passed'
         fi
 
     - name: Dump standalone logs on failure
@@ -1277,7 +1468,11 @@ jobs:
 
     - name: Cleanup standalone container
       if: ${{ always() }}
-      run: docker rm -f hg-ci-standalone >/dev/null 2>&1 || true
+      run: |
+        docker rm -f -v hg-ci-standalone >/dev/null 2>&1 || true
+        if [ -n "${STANDALONE_DATA_VOLUME:-}" ]; then
+          docker volume rm "$STANDALONE_DATA_VOLUME"
+        fi
 
     - name: Post-check cleanup
       if: ${{ always() }}
