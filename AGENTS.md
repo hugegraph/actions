@@ -20,8 +20,9 @@ Its main purpose is to publish Docker images, validate releases, and host small 
 - Do not merge `latest` and `release` wrappers unless the trigger semantics are truly identical.
 - Keep special-case workflows separate when they need extra prechecks, custom ordering, or non-standard release flow.
 - For pd/store/server changes, preserve this intent:
-  - build and test the exact locally loaded amd64/arm64 final tags
-  - only full dual-arch build and functional-test success should publish images
+  - build and test the exact locally loaded final tags
+  - standard images require both amd64/arm64 builds; explicitly selected Topling images require amd64 builds
+  - only complete builds for the selected platforms and functional-test success should publish images
 
 ## Important Files
 

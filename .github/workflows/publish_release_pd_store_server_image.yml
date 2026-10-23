@@ -15,6 +15,19 @@ on:
         required: true
         default: ''
         description: 'image version tag, for example 1.7.0'
+      runtime_variant:
+        type: choice
+        options: [standard, topling]
+        default: standard
+        description: 'RocksDB runtime (Topling is amd64 only; adds -topling to image tag)'
+      topling_jni_url:
+        required: false
+        default: ''
+        description: 'Optional JNI URL override; empty uses the source pin'
+      topling_jni_sha256:
+        required: false
+        default: ''
+        description: 'Trusted SHA-256 matching the JNI URL override'
       mvn_args:
         required: false
         default: ''
@@ -37,6 +50,9 @@ jobs:
   publish:
     uses: ./.github/workflows/_publish_pd_store_server_reusable.yml
     with:
+      runtime_variant: ${{ inputs.runtime_variant || 'standard' }}
+      topling_jni_url: ${{ inputs.topling_jni_url || '' }}
+      topling_jni_sha256: ${{ inputs.topling_jni_sha256 || '' }}
       mode: release
       source_repository: ${{ inputs.source_repository || 'apache/hugegraph' }}
       allowed_source_repositories: apache/hugegraph,hugegraph/hugegraph

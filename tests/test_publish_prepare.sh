@@ -44,11 +44,14 @@ run_prepare() {
     SOURCE_REF="$source_ref" \
     DEFAULT_SOURCE="$default_source" \
     REQUESTED_IMAGE_TAG="$image_tag" \
-    RUNTIME_VARIANT=standard \
     PUBLISH="$publish" \
     ENABLE_HASH_GATE=false \
     LAST_HASH_VALUE='' \
     DRY_RUN=false \
+    RUNTIME_VARIANT="${TEST_RUNTIME_VARIANT:-standard}" \
+    TOPLING_JNI_URL="${TEST_TOPLING_JNI_URL-https://example.org/immutable/topling.jar}" \
+    TOPLING_JNI_SHA256="${TEST_TOPLING_JNI_SHA256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}" \
+    STRICT_MODE="${TEST_STRICT_MODE:-true}" \
     GITHUB_OUTPUT="$output_file" \
     bash -s >"$log_file" 2>&1
   prepare_status=$?
@@ -113,5 +116,57 @@ run_prepare "$pd_store_workflow" release \
   apache/hugegraph apache/hugegraph,hugegraph/hugegraph \
   release-1.7.0 '' 1.7.0 true
 assert_output version_tag 1.7.0
+
+TEST_RUNTIME_VARIANT=topling
+TEST_TOPLING_JNI_URL=''
+TEST_TOPLING_JNI_SHA256=''
+run_prepare "$pd_store_workflow" latest \
+  apache/hugegraph apache/hugegraph,hugegraph/hugegraph \
+  master apache/hugegraph@master '' true
+assert_output version_tag latest-topling
+assert_output cache_channel latest-topling
+assert_output hash_gate_applied false
+unset TEST_TOPLING_JNI_URL TEST_TOPLING_JNI_SHA256
+
+run_prepare "$pd_store_workflow" latest \
+  hugegraph/hugegraph apache/hugegraph,hugegraph/hugegraph \
+  feature/topling apache/hugegraph@master smoke-topling false
+assert_output version_tag smoke-topling
+assert_output publish_images false
+
+run_prepare "$pd_store_workflow" release \
+  apache/hugegraph apache/hugegraph,hugegraph/hugegraph \
+  release-1.8.0 '' 1.8.0 true
+assert_output version_tag 1.8.0-topling
+
+TEST_TOPLING_JNI_SHA256=''
+if run_prepare "$pd_store_workflow" latest \
+  apache/hugegraph apache/hugegraph master apache/hugegraph@master '' true; then
+  printf '%s\n' 'Topling without a trusted artifact checksum unexpectedly succeeded' >&2
+  exit 1
+fi
+unset TEST_TOPLING_JNI_SHA256
+
+TEST_STRICT_MODE=false
+if run_prepare "$pd_store_workflow" release \
+  apache/hugegraph apache/hugegraph release-1.8.0 '' 1.8.0 true; then
+  printf '%s\n' 'Topling without functional tests unexpectedly succeeded' >&2
+  exit 1
+fi
+unset TEST_STRICT_MODE
+
+TEST_RUNTIME_VARIANT=invalid
+if run_prepare "$pd_store_workflow" latest \
+  apache/hugegraph apache/hugegraph master apache/hugegraph@master '' true; then
+  printf '%s\n' 'Invalid runtime unexpectedly succeeded' >&2
+  exit 1
+fi
+unset TEST_RUNTIME_VARIANT
+
+if run_prepare "$pd_store_workflow" latest \
+  apache/hugegraph apache/hugegraph master apache/hugegraph@master latest-topling true; then
+  printf '%s\n' 'Standard runtime using a Topling tag unexpectedly succeeded' >&2
+  exit 1
+fi
 
 printf '%s\n' 'publish prepare regression tests passed'

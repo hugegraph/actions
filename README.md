@@ -23,12 +23,7 @@ Choose `source_repository` and `source_ref` to select the code to build. Set `im
 
 PD/Store/Server builds amd64 and arm64 images, then runs Compose and graph CRUD checks using the built amd64 images before publishing. Its smoke tests use 1 PD + 1 Store + 1 Server; they do not validate a production HA deployment. Sources with `docker/bake.hcl` share one Maven build; older sources use the per-Dockerfile path.
 
-The PD/Store/Server latest workflow also accepts `runtime_variant=topling`. It builds
-amd64-only PD, Store and standalone Server images from source-provided Topling Docker
-targets; HStore Server retains its remote-storage runtime. Standard images remain
-amd64/arm64. Choose an explicit Topling-specific tag such as `topling` or
-`pr179-topling`; this variant never updates the standard latest-source marker.
-The workflow validates the local candidates before publishing the deployment set.
+For ToplingDB, select `runtime_variant=topling` in the same latest or release workflow to use the JNI artifact pinned by the selected source revision. Tags gain a `-topling` suffix (`latest-topling`, `1.8.0-topling`); all four images use the same source commit. Topling builds are amd64 only and require native-library, graph CRUD and restart-persistence checks before publication. Compose selects this set with `HUGEGRAPH_VERSION=latest-topling`; Helm uses `--set global.runtimeVariant=topling`. See [Topling builds](docs/workflow-maintenance.md#topling-builds) for artifact requirements and validation-only runs.
 
 ## Helm charts
 
