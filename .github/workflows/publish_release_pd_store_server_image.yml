@@ -59,8 +59,8 @@ jobs:
           fi
           source_sha="$(git rev-parse HEAD)"
           [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
-          candidate_tag="ci-release-${RELEASE_IMAGE_TAG}-${source_sha:0:12}"
-          [[ "$candidate_tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
+          candidate_tag="ci-release-${RELEASE_IMAGE_TAG}-${source_sha:0:12}-${GITHUB_RUN_ID}"
+          [[ "${candidate_tag}-topling" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
           {
             echo "source_sha=$source_sha"
             echo "candidate_tag=$candidate_tag"
@@ -84,6 +84,7 @@ jobs:
       allowed_source_repositories: apache/hugegraph
       source_ref: ${{ needs.resolve_source.outputs.source_sha }}
       image_tag: ${{ needs.resolve_source.outputs.candidate_tag }}
+      release_candidate: true
       publish: true
       mvn_args: ${{ inputs.mvn_args }}
       strict_mode: true
@@ -235,7 +236,7 @@ jobs:
                   if [ "$old" = '__ABSENT__' ]; then
                     delete_hub_tag "$final_ref" || true
                   else
-                    docker buildx imagetools create \
+                    docker buildx imagetools create --prefer-index=false \
                       --tag "$final_ref" "${repository}@${old}" || true
                   fi
                   current="$(get_hub_tag_digest "$final_ref" 2>/dev/null || echo __UNKNOWN__)"
@@ -298,7 +299,7 @@ jobs:
             IFS='|' read -r repository _ final_tag _ _ <<< "$entry"
             final_ref="${repository}:${final_tag}"
             digest="${candidate_digest[$final_ref]}"
-            docker buildx imagetools create --tag "$final_ref" "${repository}@${digest}"
+            docker buildx imagetools create --prefer-index=false --tag "$final_ref" "${repository}@${digest}"
             actual="$(inspect_digest "$final_ref")"
             if [ "$actual" != "$digest" ]; then
               echo "Promoted digest mismatch for $final_ref" >&2
@@ -318,7 +319,7 @@ jobs:
 
   cleanup_candidates:
     needs: [resolve_source, validate, promote]
-    if: ${{ always() }}
+    if: ${{ needs.promote.result == 'success' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     env:

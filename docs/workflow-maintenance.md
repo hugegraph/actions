@@ -40,6 +40,14 @@ runs stay standard. Select `runtime_variant=topling` in a manual latest run when
 an on-demand Topling development image is needed. Version tags use the paired
 release workflow, rather than the latest workflow.
 
+Release validation publishes both variants to reserved
+`ci-release-<version>-<sha12>-<run_id>` candidate tags. Only after both validation
+jobs succeed does one promotion job verify and publish all eight final tags.
+The run ID stays unchanged on **Re-run failed jobs**, so the successful sibling's
+candidates remain available. Failed or cancelled runs retain candidates; cleanup
+runs only after successful promotion. A new dispatch gets different candidate
+tags. Ordinary latest inputs cannot use the reserved `ci-release-*` namespace.
+
 The selected source pins an immutable JNI JAR URL and SHA-256 in
 `docker/topling-runtime.env`. To validate another trusted build of
 [hugegraph/toplingdb](https://github.com/hugegraph/toplingdb/actions/workflows/topling-jni.yml),
@@ -69,6 +77,15 @@ normal stop and restart for both standalone and 1 PD + 1 Store + 1 Server.
 The Topling publication gate also creates RocksDB data with standard images from
 the same source commit, stops them normally, and verifies the Topling images can
 read and update that data on the same persisted volumes.
+The standalone seed uses temporary small buffer settings to force business SSTs.
+Before image replacement, the workflow restores just those settings to their
+original values, including unset defaults, and preserves all other graph options.
+It verifies the original settings under Topling and after returning to standard.
+An API-created graph must retain its persisted definition, nickname, data and
+new writes across both image replacements, with its provider selected by each
+image's environment. The local regression covers legacy image-layer graph files
+and persistent graph-directory/file symlinks; real container qualification still
+requires a matching Server source containing the persistent graph-config contract.
 After pushing, Topling runs pull each returned immutable digest and verify its amd64
 image configuration matches the tested image, including source commit and runtime
 labels. The run summary records those verified digest references for deployment.
@@ -109,6 +126,7 @@ Local checks require no Docker or publication:
 python3 -m unittest discover -s tests -p 'test_helm*.py' -v
 bash tests/test_publish_prepare.sh
 bash tests/test_topling_artifact.sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_pd_store_release.py -v
 actionlint .github/workflows/publish_helm.yml .github/workflows/publish_latest_*.yml
 
 uv run --no-project --python 3.11 python -m unittest discover -s tests -p 'test_python_release.py' -v

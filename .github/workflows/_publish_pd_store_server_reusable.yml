@@ -30,6 +30,11 @@ on:
         required: false
         default: ''
         type: string
+      release_candidate:
+        description: "internal paired-release candidate namespace; not a manual latest input"
+        required: false
+        default: false
+        type: boolean
       runtime_variant:
         description: "RocksDB runtime: standard or topling (linux/amd64 only)"
         required: false
@@ -131,6 +136,7 @@ jobs:
         TOPLING_JNI_URL: ${{ inputs.topling_jni_url }}
         TOPLING_JNI_SHA256: ${{ inputs.topling_jni_sha256 }}
         STRICT_MODE: ${{ inputs.strict_mode }}
+        RELEASE_CANDIDATE: ${{ inputs.release_candidate }}
       run: |
         set -euo pipefail
 
@@ -169,6 +175,26 @@ jobs:
           echo "dry_run is only supported by latest mode"
           exit 1
         fi
+        # Release candidates are owned by one workflow run, including failed-job
+        # retries. Ordinary latest dispatches cannot overwrite this namespace.
+        case "${RELEASE_CANDIDATE:-false}" in
+          true)
+            source_lower="${SOURCE_REF,,}"
+            if [ "$MODE" != latest ] || [ "$SOURCE_REPOSITORY" != apache/hugegraph ] \
+              || ! [[ "$source_lower" =~ ^[0-9a-f]{40}$ ]] \
+              || ! [[ "$REQUESTED_IMAGE_TAG" =~ ^ci-release-[0-9]+\.[0-9]+\.[0-9]+-${source_lower:0:12}-${GITHUB_RUN_ID}$ ]]; then
+              echo "Release candidates require the paired Apache source SHA and current run ID"
+              exit 1
+            fi
+            ENABLE_HASH_GATE=false
+            ;;
+          false)
+            case "$REQUESTED_IMAGE_TAG" in
+              ci-release-*) echo "ci-release-* is reserved for the paired release workflow"; exit 1 ;;
+            esac
+            ;;
+          *) echo "Invalid release_candidate input"; exit 1 ;;
+        esac
         if [ "$SOURCE_REPOSITORY" != "apache/hugegraph" ]; then
           ENABLE_HASH_GATE=false
         fi
@@ -1303,8 +1329,8 @@ jobs:
         }
         standalone_query() {
           local payload
-          payload="$(jq -nc --arg gremlin "$1" \
-            '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",aliases:{graph:"DEFAULT-hugegraph",g:"__g_DEFAULT-hugegraph"}}')"
+          payload="$(jq -nc --arg gremlin "$1" --arg graph "${2:-hugegraph}" \
+            '{gremlin:$gremlin,bindings:{},language:"gremlin-groovy",aliases:{graph:("DEFAULT-"+$graph),g:("__g_DEFAULT-"+$graph)}}')"
           curl --fail-with-body -sS --max-time 30 -H 'Content-Type: application/json' \
             --data-binary "$payload" http://127.0.0.1:18080/gremlin \
             | tee /tmp/hg-ci-standalone-query.json
@@ -1313,6 +1339,45 @@ jobs:
         verify_payloads() {
           standalone_query "samples=[0,31,63].collect{i->b=new byte[49152];new java.util.Random(4200L+i).nextBytes(b);expected=java.util.Base64.getEncoder().encodeToString(b);actual=g.V().has('ci_payload','ci_age',i).values('ci_payload').next();[key:i,matches:actual==expected,length:actual.length()]};[[count:g.V().hasLabel('ci_payload').count().next(),samples:samples]]"
           jq -e '.result.data[0] | .count == 64 and (.samples | length) == 3 and all(.samples[]; .matches and .length == 65536)' /tmp/hg-ci-standalone-query.json
+        }
+        verify_dynamic_graph() {
+          local graph="${2:-ci_dynamic}" nickname="${3:-CI_dynamic_survives}"
+          curl --fail-with-body -sS --max-time 30 \
+            "http://127.0.0.1:18080/graphspaces/DEFAULT/graphs/$graph" \
+            | jq -e --arg graph "$graph" --arg nickname "$nickname" '.name == $graph and .nickname == $nickname'
+          docker exec hg-ci-standalone bash -euc '
+            test "$TOPLINGDB_ROCKSDB_PROVIDER" = "$1"
+            mapfile -t definitions < <(grep -El "^store[[:space:]]*=[[:space:]]*$2$" ./conf/graphs/*.properties)
+            test "${#definitions[@]}" -eq 1
+            case "$(readlink -f "${definitions[0]}")" in
+              /hugegraph-server/rocksdb-data/.hugegraph-config/graphs/*) ;;
+              *) echo "Dynamic graph definition is not in the data volume"; exit 1 ;;
+            esac
+            grep -Eq "^rocksdb[.]provider[[:space:]]*=[[:space:]]*$1$" "${definitions[0]}"
+          ' -- "$1" "$graph"
+        }
+        seed_buffer_config_lines() {
+          # Preserve complete logical properties, including continued values.
+          awk -v keep="$2" '
+            !continued { selected = ($0 ~ /^[[:space:]]*rocksdb[.](write_buffer_size|min_write_buffer_number_to_merge)([[:space:]]*[:=]|[[:space:]]+)/) }
+            (selected && keep == "keep") || (!selected && keep == "drop") { print }
+            { line = $0; sub(/\r$/, "", line); continued = match(line, /\\+$/) && RLENGTH % 2 }
+          ' "$1"
+        }
+        set_seed_buffer_options() {
+          seed_buffer_config_lines "$1" keep > "$2"
+          restore_seed_buffer_options "$1" /dev/null
+          printf 'rocksdb.write_buffer_size=1048576\nrocksdb.min_write_buffer_number_to_merge=1\n' >> "$1"
+        }
+        restore_seed_buffer_options() {
+          local target temporary
+          test -r "$2"
+          target="$(readlink -f "$1")"
+          temporary="$(mktemp "${target}.ci-options.XXXXXX")"
+          seed_buffer_config_lines "$target" drop > "$temporary"
+          cat "$2" >> "$temporary"
+          chmod --reference="$target" "$temporary"
+          mv -T "$temporary" "$target"
         }
         stop_standalone_normally() {
           docker stop -t 60 hg-ci-standalone
@@ -1332,13 +1397,11 @@ jobs:
           seed_image="$STANDARD_STANDALONE_IMAGE"
         fi
         if [ "$RUNTIME_VARIANT" = topling ]; then
-          # Fixture-only configuration lives in the seed container's writable
-          # layer. Published images and the Topling candidate retain their defaults.
-          docker run "${run_args[@]}" "$seed_image" bash -euc '
-            sed -Ei "/^[[:space:]]*rocksdb[.](write_buffer_size|min_write_buffer_number_to_merge)[[:space:]]*=/d" conf/graphs/hugegraph.properties
-            printf "rocksdb.write_buffer_size=1048576\nrocksdb.min_write_buffer_number_to_merge=1\n" >> conf/graphs/hugegraph.properties
-            exec ./docker-entrypoint.sh
-          '
+          # Graph configs may live in the data volume. Snapshot only the two
+          # fixture knobs and restore them before replacing this seed container.
+          docker run "${run_args[@]}" "$seed_image" bash -euc "$(declare -f seed_buffer_config_lines set_seed_buffer_options restore_seed_buffer_options)
+            set_seed_buffer_options conf/graphs/hugegraph.properties /tmp/hg-ci-buffer-options
+            exec ./docker-entrypoint.sh"
         else
           docker run "${run_args[@]}" "$seed_image"
         fi
@@ -1362,6 +1425,20 @@ jobs:
             jq -e --argjson count "$last" '.result.data == [$count]' /tmp/hg-ci-standalone-query.json
           done
           verify_payloads
+          curl --fail-with-body -sS --max-time 30 -X POST \
+            -H 'Content-Type: application/json' \
+            --data-binary '{"backend":"rocksdb","serializer":"binary","store":"ci_dynamic","nickname":"CI_dynamic_survives","rocksdb.data_path":"/hugegraph-server/rocksdb-data/ci_dynamic/data","rocksdb.wal_path":"/hugegraph-server/rocksdb-data/ci_dynamic/wal"}' \
+            http://127.0.0.1:18080/graphspaces/DEFAULT/graphs/ci_dynamic \
+            | jq -e '.name == "ci_dynamic"'
+          standalone_query "s=graph.schema();s.propertyKey('ci_key').asText().create();s.vertexLabel('ci_entry').properties('ci_key').primaryKeys('ci_key').create();graph.addVertex(T.label,'ci_entry','ci_key','stock_before');graph.tx().commit();[[keys:g.V().values('ci_key').toList()]]" ci_dynamic
+          jq -e '.result.data[0].keys == ["stock_before"]' /tmp/hg-ci-standalone-query.json
+          verify_dynamic_graph rocksdb
+          docker cp hg-ci-standalone:/tmp/hg-ci-buffer-options /tmp/hg-ci-buffer-options.original
+          docker exec hg-ci-standalone bash -euc "$(declare -f seed_buffer_config_lines restore_seed_buffer_options)
+            restore_seed_buffer_options conf/graphs/hugegraph.properties /tmp/hg-ci-buffer-options"
+          docker exec hg-ci-standalone bash -euc "$(declare -f seed_buffer_config_lines)
+            seed_buffer_config_lines conf/graphs/hugegraph.properties keep" > /tmp/hg-ci-buffer-options.restored
+          cmp /tmp/hg-ci-buffer-options.original /tmp/hg-ci-buffer-options.restored
           stop_standalone_normally
           docker run --pull=never --rm --entrypoint bash \
             --mount "type=volume,src=$STANDALONE_DATA_VOLUME,dst=/data,readonly" "$seed_image" \
@@ -1370,6 +1447,22 @@ jobs:
           docker rm hg-ci-standalone
           docker run "${run_args[@]}" "$STANDALONE_IMAGE"
           wait_standalone
+          docker exec hg-ci-standalone bash -euc "$(declare -f seed_buffer_config_lines)
+            seed_buffer_config_lines conf/graphs/hugegraph.properties keep" > /tmp/hg-ci-buffer-options.topling
+          cmp /tmp/hg-ci-buffer-options.original /tmp/hg-ci-buffer-options.topling
+          verify_dynamic_graph topling
+          standalone_query "[[keys:g.V().values('ci_key').toList()]]" ci_dynamic
+          jq -e '.result.data[0].keys == ["stock_before"]' /tmp/hg-ci-standalone-query.json
+          standalone_query "graph.addVertex(T.label,'ci_entry','ci_key','topling_after');graph.tx().commit();g.V().count().next()" ci_dynamic
+          jq -e '.result.data == [2]' /tmp/hg-ci-standalone-query.json
+          curl --fail-with-body -sS --max-time 30 -X POST \
+            -H 'Content-Type: application/json' \
+            --data-binary '{"backend":"rocksdb","serializer":"binary","store":"ci_topling_created","nickname":"CI_topling_created_survives","rocksdb.data_path":"/hugegraph-server/rocksdb-data/ci_topling_created/data","rocksdb.wal_path":"/hugegraph-server/rocksdb-data/ci_topling_created/wal"}' \
+            http://127.0.0.1:18080/graphspaces/DEFAULT/graphs/ci_topling_created \
+            | jq -e '.name == "ci_topling_created"'
+          standalone_query "s=graph.schema();s.propertyKey('ci_key').asText().create();s.vertexLabel('ci_entry').properties('ci_key').primaryKeys('ci_key').create();graph.addVertex(T.label,'ci_entry','ci_key','created_on_topling');graph.tx().commit();g.V().count().next()" ci_topling_created
+          jq -e '.result.data == [1]' /tmp/hg-ci-standalone-query.json
+          verify_dynamic_graph topling ci_topling_created CI_topling_created_survives
           docker exec hg-ci-standalone bash -euc '
             cd /hugegraph-server/topling
             sha256sum -c easy-migrate.sha256
@@ -1390,11 +1483,45 @@ jobs:
           standalone_query "[[age:g.V().has('ci_person','ci_name','alice').values('ci_age').next(),vertices:g.V().hasLabel('ci_person').count().next(),edges:g.E().hasLabel('ci_knows').count().next(),indexed:g.V().has('ci_person','ci_age',P.gte(42)).count().next()]]"
           jq -e '.result.data[0] | .age == 42 and .vertices == 3 and .edges == 2 and .indexed == 2' /tmp/hg-ci-standalone-query.json
           verify_payloads
+          verify_dynamic_graph topling
+          standalone_query "[[keys:g.V().values('ci_key').order().toList()]]" ci_dynamic
+          jq -e '.result.data[0].keys == ["stock_before","topling_after"]' /tmp/hg-ci-standalone-query.json
+          verify_dynamic_graph topling ci_topling_created CI_topling_created_survives
+          standalone_query "[[keys:g.V().values('ci_key').toList()]]" ci_topling_created
+          jq -e '.result.data[0].keys == ["created_on_topling"]' /tmp/hg-ci-standalone-query.json
+          # Returning to the same-source standard image must reset each persisted
+          # graph's provider and retain API-created definitions and all writes.
+          stop_standalone_normally
+          docker rm -v hg-ci-standalone
+          docker run "${run_args[@]}" "$STANDARD_STANDALONE_IMAGE"
+          wait_standalone
+          docker exec hg-ci-standalone bash -euc '
+            test "$TOPLINGDB_ROCKSDB_PROVIDER" = rocksdb
+            pid=$(pgrep -o -x java)
+            grep -F librocksdbjni "/proc/$pid/maps"
+            ! grep -F /topling/ "/proc/$pid/maps"
+          '
+          docker exec hg-ci-standalone bash -euc "$(declare -f seed_buffer_config_lines)
+            seed_buffer_config_lines conf/graphs/hugegraph.properties keep" > /tmp/hg-ci-buffer-options.standard
+          cmp /tmp/hg-ci-buffer-options.original /tmp/hg-ci-buffer-options.standard
+          verify_dynamic_graph rocksdb
+          verify_payloads
+          standalone_query "[[vertices:g.V().hasLabel('ci_person').count().next(),edges:g.E().hasLabel('ci_knows').count().next(),indexed:g.V().has('ci_person','ci_age',P.gte(42)).count().next()]]"
+          jq -e '.result.data[0] | .vertices == 3 and .edges == 2 and .indexed == 2' /tmp/hg-ci-standalone-query.json
+          standalone_query "[[keys:g.V().values('ci_key').order().toList()]]" ci_dynamic
+          jq -e '.result.data[0].keys == ["stock_before","topling_after"]' /tmp/hg-ci-standalone-query.json
+          standalone_query "graph.addVertex(T.label,'ci_entry','ci_key','stock_after');graph.tx().commit();g.V().count().next()" ci_dynamic
+          jq -e '.result.data == [3]' /tmp/hg-ci-standalone-query.json
+          verify_dynamic_graph rocksdb ci_topling_created CI_topling_created_survives
+          standalone_query "[[keys:g.V().values('ci_key').toList()]]" ci_topling_created
+          jq -e '.result.data[0].keys == ["created_on_topling"]' /tmp/hg-ci-standalone-query.json
+          standalone_query "graph.addVertex(T.label,'ci_entry','ci_key','stock_after_return');graph.tx().commit();g.V().count().next()" ci_topling_created
+          jq -e '.result.data == [2]' /tmp/hg-ci-standalone-query.json
           standalone_query "g.V().hasLabel('ci_person').drop().iterate();graph.tx().commit();g.V().hasLabel('ci_person').count().next()"
           jq -e '.result.data == [0]' /tmp/hg-ci-standalone-query.json
           standalone_query "g.V().hasLabel('ci_payload').drop().iterate();graph.tx().commit();g.V().hasLabel('ci_payload').count().next()"
           jq -e '.result.data == [0]' /tmp/hg-ci-standalone-query.json
-          echo 'Standalone stock RocksDB SSTs reopened with Topling; schema, index, CRUD and restart persistence passed'
+          echo 'Standalone stock SSTs, restored defaults, persisted dynamic graphs, indexes and writes survived Topling and standard image replacement'
         fi
 
     - name: Dump standalone logs on failure
