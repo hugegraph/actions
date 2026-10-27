@@ -84,6 +84,54 @@ class ResolveTests(unittest.TestCase):
             output.assert_not_called()
 
 
+class ChartChangesTests(unittest.TestCase):
+    def test_first_run_and_changed_directory_need_publication(self):
+        chart_sha = "c" * 40
+        for last_hash in ("", "d" * 40):
+            with self.subTest(last_hash=last_hash), \
+                    patch.object(release, "github", return_value=[{"sha": chart_sha}]) as github, \
+                    patch.object(release, "output") as output:
+                self.assertEqual(release.changes(SHA, last_hash), chart_sha)
+                github.assert_called_once_with(f"commits?sha={SHA}&path=helm%2Fhugegraph&per_page=1")
+                output.assert_called_once_with(chart_sha=chart_sha, need_update="true")
+
+    def test_unrelated_source_commits_do_not_republish_the_chart(self):
+        chart_sha = "c" * 40
+        for source_sha in (SHA, "d" * 40):
+            with self.subTest(source_sha=source_sha), \
+                    patch.object(release, "github", return_value=[{"sha": chart_sha}]) as github, \
+                    patch.object(release, "output") as output:
+                release.changes(source_sha, chart_sha)
+                github.assert_called_once_with(f"commits?sha={source_sha}&path=helm%2Fhugegraph&per_page=1")
+                output.assert_called_once_with(chart_sha=chart_sha, need_update="false")
+
+    def test_invalid_source_or_marker_is_rejected_before_api_access(self):
+        for source_sha, last_hash in (("master", ""), (SHA, "not-a-sha")):
+            with self.subTest(source_sha=source_sha, last_hash=last_hash), \
+                    patch.object(release, "github") as github, \
+                    patch.object(release, "output") as output:
+                with self.assertRaises(ValueError):
+                    release.changes(source_sha, last_hash)
+                github.assert_not_called()
+                output.assert_not_called()
+
+    def test_missing_or_malformed_history_is_not_treated_as_unchanged(self):
+        for history in ([], {}, [None], [{}], [{"sha": "master"}], [{"sha": None}]):
+            with self.subTest(history=history), \
+                    patch.object(release, "github", return_value=history), \
+                    patch.object(release, "output") as output:
+                with self.assertRaises(ValueError):
+                    release.changes(SHA)
+                output.assert_not_called()
+
+    def test_api_failure_does_not_emit_a_skip_or_success_marker(self):
+        with patch.object(release, "github", side_effect=subprocess.CalledProcessError(1, "gh")), \
+                patch.object(release, "output") as output:
+            with self.assertRaises(subprocess.CalledProcessError):
+                release.changes(SHA)
+            output.assert_not_called()
+
+
 class PublicationGateTests(unittest.TestCase):
     def setUp(self):
         self.data = {"source_sha": SHA, "channel": "dev", "version": "0.2.0-dev.123"}

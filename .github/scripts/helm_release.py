@@ -80,6 +80,22 @@ def resolve(ref, channel="dev"):
     return sha
 
 
+def changes(sha, last_hash=""):
+    """Compare directory history at the exact source revision, not unrelated commits."""
+    require(re.fullmatch(SHA, sha), "Invalid source SHA")
+    require(not last_hash or re.fullmatch(SHA, last_hash), "Invalid last published Chart commit")
+    commits = github(f"commits?sha={sha}&path=helm%2Fhugegraph&per_page=1")
+    require(isinstance(commits, list) and len(commits) == 1 and isinstance(commits[0], dict),
+            "Chart directory history is missing")
+    chart_sha = commits[0].get("sha")
+    require(isinstance(chart_sha, str) and re.fullmatch(SHA, chart_sha), "Invalid Chart directory commit")
+    need_update = chart_sha != last_hash
+    output(chart_sha=chart_sha, need_update="true" if need_update else "false")
+    print(f"Chart directory commit: {chart_sha}; " +
+          ("update needed" if need_update else "unchanged, skipping publication"))
+    return chart_sha
+
+
 def stable(version, label):
     require(isinstance(version, str) and re.fullmatch(STABLE, version), f"{label} must be x.y.z")
     return tuple(map(int, version.split(".")))
@@ -583,6 +599,9 @@ def main():
     command = commands.add_parser("resolve")
     command.add_argument("--ref", required=True)
     command.add_argument("--channel", choices=("dev", "release"), default="dev")
+    command = commands.add_parser("changes")
+    command.add_argument("--sha", required=True)
+    command.add_argument("--last-hash", default="")
     command = commands.add_parser("package")
     command.add_argument("--source", type=Path, required=True)
     command.add_argument("--sha", required=True)
