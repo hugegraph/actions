@@ -3,48 +3,355 @@ name: "Publish pd-store-server image(release)"
 on:
   workflow_dispatch:
     inputs:
-      source_repository:
-        required: false
-        default: 'apache/hugegraph'
-        description: 'source repository in owner/name format'
       source_ref:
         required: true
         default: 'master'
-        description: 'source branch, tag, or commit used to build the release images'
+        description: 'Apache HugeGraph branch, tag, or commit resolved once for both variants'
       image_tag:
         required: true
         default: ''
         description: 'image version tag, for example 1.7.0'
+      topling_jni_url:
+        required: false
+        default: ''
+        description: 'Optional JNI URL override; empty uses the source pin'
+      topling_jni_sha256:
+        required: false
+        default: ''
+        description: 'Trusted SHA-256 matching the JNI URL override'
       mvn_args:
         required: false
         default: ''
         description: 'Docker build args, one NAME=VALUE entry per line'
-      strict_mode:
-        type: boolean
-        required: false
-        default: true
-        description: 'whether integration precheck is mandatory before publish'
       wait_timeout_sec:
         required: false
         default: '300'
         description: 'docker compose wait timeout in seconds for precheck/self-check'
 
+# One release run owns both the standard and Topling final tags. Validation jobs
+# may run in parallel, but no final tag moves until both runtime sets pass.
 concurrency:
   group: publish-release-pd-store-server
   cancel-in-progress: false
 
 jobs:
-  publish:
+  resolve_source:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      candidate_tag: ${{ steps.source.outputs.candidate_tag }}
+    steps:
+      - name: Resolve Apache release source once
+        uses: actions/checkout@v7
+        with:
+          repository: apache/hugegraph
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - name: Record immutable source commit
+        id: source
+        env:
+          RELEASE_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RELEASE_IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release image_tag must be x.y.z for the paired runtime variants"
+            exit 1
+          fi
+          source_sha="$(git rev-parse HEAD)"
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          candidate_tag="ci-release-${RELEASE_IMAGE_TAG}-${source_sha:0:12}-${GITHUB_RUN_ID}"
+          [[ "${candidate_tag}-topling" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
+          {
+            echo "source_sha=$source_sha"
+            echo "candidate_tag=$candidate_tag"
+          } >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: resolve_source
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime_variant: [standard, topling]
     uses: ./.github/workflows/_publish_pd_store_server_reusable.yml
     with:
-      mode: release
-      source_repository: ${{ inputs.source_repository || 'apache/hugegraph' }}
-      allowed_source_repositories: apache/hugegraph,hugegraph/hugegraph
-      source_ref: ${{ inputs.source_ref }}
-      image_tag: ${{ inputs.image_tag }}
+      runtime_variant: ${{ matrix.runtime_variant }}
+      topling_jni_url: ${{ inputs.topling_jni_url || '' }}
+      topling_jni_sha256: ${{ inputs.topling_jni_sha256 || '' }}
+      # The reusable workflow publishes only release/source-scoped candidates here. A
+      # single promotion job below owns all eight final release tags.
+      mode: latest
+      source_repository: apache/hugegraph
+      allowed_source_repositories: apache/hugegraph
+      source_ref: ${{ needs.resolve_source.outputs.source_sha }}
+      image_tag: ${{ needs.resolve_source.outputs.candidate_tag }}
+      release_candidate: true
       publish: true
       mvn_args: ${{ inputs.mvn_args }}
-      strict_mode: ${{ inputs.strict_mode }}
+      strict_mode: true
+      dry_run: false
       wait_timeout_sec: ${{ inputs.wait_timeout_sec || '300' }}
       enable_hash_gate: false
     secrets: inherit
+
+  promote:
+    needs: [resolve_source, validate]
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_SHA: ${{ needs.resolve_source.outputs.source_sha }}
+      CANDIDATE_BASE: ${{ needs.resolve_source.outputs.candidate_tag }}
+      FINAL_BASE: ${{ inputs.image_tag }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Promote validated standard and Topling sets together
+        run: |
+          set -euo pipefail
+
+          entries=(
+            "hugegraph/pd|$CANDIDATE_BASE|$FINAL_BASE|standard|amd64 arm64"
+            "hugegraph/store|$CANDIDATE_BASE|$FINAL_BASE|standard|amd64 arm64"
+            "hugegraph/server|$CANDIDATE_BASE|$FINAL_BASE|hstore|amd64 arm64"
+            "hugegraph/hugegraph|$CANDIDATE_BASE|$FINAL_BASE|standard|amd64 arm64"
+            "hugegraph/pd|$CANDIDATE_BASE-topling|$FINAL_BASE-topling|topling|amd64"
+            "hugegraph/store|$CANDIDATE_BASE-topling|$FINAL_BASE-topling|topling|amd64"
+            "hugegraph/server|$CANDIDATE_BASE-topling|$FINAL_BASE-topling|hstore|amd64"
+            "hugegraph/hugegraph|$CANDIDATE_BASE-topling|$FINAL_BASE-topling|topling|amd64"
+          )
+          declare -A candidate_digest old_digest
+
+          refresh_hub_token() {
+            local payload
+            payload="$(jq -cn --arg username "$DOCKERHUB_USERNAME" \
+              --arg password "$DOCKERHUB_PASSWORD" \
+              '{username:$username,password:$password}')"
+            hub_token="$(
+              curl --fail-with-body -sS -L \
+                -H 'Content-Type: application/json' \
+                --data-binary "$payload" \
+                https://hub.docker.com/v2/users/login |
+                jq -er '.token // .access_token'
+            )"
+          }
+
+          get_hub_tag_digest() {
+            local reference="$1" repository tag response_file http_code attempt digest
+            repository="${reference%:*}"
+            tag="${reference##*:}"
+            response_file="$(mktemp)"
+            for attempt in 1 2 3; do
+              if http_code="$(
+                curl -sS -L -o "$response_file" -w '%{http_code}' \
+                  -H "Authorization: Bearer $hub_token" \
+                  "https://hub.docker.com/v2/repositories/${repository}/tags/${tag}/"
+              )"; then
+                case "$http_code" in
+                  200)
+                    if digest="$(jq -er '.digest' "$response_file")"; then
+                      printf '%s\n' "$digest"
+                      rm -f "$response_file"
+                      return 0
+                    fi
+                    ;;
+                  404)
+                    printf '%s\n' '__ABSENT__'
+                    rm -f "$response_file"
+                    return 0
+                    ;;
+                esac
+              fi
+              sleep $((attempt * 3))
+            done
+            echo "Could not determine Docker Hub tag state for $reference" >&2
+            rm -f "$response_file"
+            return 1
+          }
+
+          inspect_digest() {
+            local reference="$1" attempt
+            for attempt in 1 2 3; do
+              if docker buildx imagetools inspect "$reference" \
+                   --format '{{json .}}' 2>/dev/null |
+                   jq -er '.manifest.digest'; then
+                return 0
+              fi
+              sleep $((attempt * 3))
+            done
+            return 1
+          }
+
+          delete_hub_tag() {
+            local reference="$1" repository tag
+            repository="${reference%:*}"
+            tag="${reference##*:}"
+            curl --fail-with-body -sS -L -X DELETE \
+              -H "Authorization: Bearer $hub_token" \
+              "https://hub.docker.com/v2/repositories/${repository}/tags/${tag}/"
+          }
+
+          verify_candidate_platform() {
+            local repository="$1" digest="$2" architecture="$3" runtime="$4"
+            local reference="${repository}@${digest}" inspect_file
+            inspect_file="$(mktemp)"
+            docker pull --platform "linux/${architecture}" "$reference"
+            docker image inspect --platform "linux/${architecture}" "$reference" > "$inspect_file"
+            jq -e --arg source 'https://github.com/apache/hugegraph' \
+              --arg revision "$SOURCE_SHA" --arg runtime "$runtime" \
+              --arg architecture "$architecture" '
+              .[0] |
+              .Os == "linux" and .Architecture == $architecture and
+              .Config.Labels["org.opencontainers.image.source"] == $source and
+              .Config.Labels["org.opencontainers.image.revision"] == $revision and
+              .Config.Labels["org.apache.hugegraph.rocksdb-runtime"] == $runtime
+            ' "$inspect_file"
+            rm -f "$inspect_file"
+          }
+
+          rollback_release() {
+            local entry repository final_tag final_ref current old candidate attempt restored
+            local failed=false
+            if ! refresh_hub_token; then
+              echo 'Unable to refresh Docker Hub token for release rollback' >&2
+              return 1
+            fi
+            for entry in "${entries[@]}"; do
+              IFS='|' read -r repository _ final_tag _ _ <<< "$entry"
+              final_ref="${repository}:${final_tag}"
+              old="${old_digest[$final_ref]}"
+              candidate="${candidate_digest[$final_ref]}"
+              restored=false
+              for attempt in 1 2 3; do
+                current="$(get_hub_tag_digest "$final_ref" 2>/dev/null || echo __UNKNOWN__)"
+                if [ "$current" = "$old" ]; then
+                  restored=true
+                elif [ "$current" = "$candidate" ]; then
+                  if [ "$old" = '__ABSENT__' ]; then
+                    delete_hub_tag "$final_ref" || true
+                  else
+                    docker buildx imagetools create --prefer-index=false \
+                      --tag "$final_ref" "${repository}@${old}" || true
+                  fi
+                  current="$(get_hub_tag_digest "$final_ref" 2>/dev/null || echo __UNKNOWN__)"
+                  [ "$current" = "$old" ] && restored=true
+                elif [ "$current" != '__UNKNOWN__' ]; then
+                  echo "Refusing to overwrite newer tag $final_ref during rollback" >&2
+                  break
+                fi
+                [ "$restored" = true ] && break
+                sleep $((attempt * 3))
+              done
+              if [ "$restored" != true ]; then
+                echo "Failed to restore $final_ref" >&2
+                failed=true
+              fi
+            done
+            [ "$failed" = false ]
+          }
+
+          # Snapshot all final tags immediately after a fresh Hub login. Release
+          # runs are serialized, so these remain the rollback baseline while the
+          # release/source-scoped candidates are inspected.
+          refresh_hub_token
+          for entry in "${entries[@]}"; do
+            IFS='|' read -r repository _ final_tag _ _ <<< "$entry"
+            final_ref="${repository}:${final_tag}"
+            old_digest["$final_ref"]="$(get_hub_tag_digest "$final_ref")"
+          done
+
+          for entry in "${entries[@]}"; do
+            IFS='|' read -r repository candidate_tag final_tag runtime architectures <<< "$entry"
+            candidate_ref="${repository}:${candidate_tag}"
+            final_ref="${repository}:${final_tag}"
+            digest="$(inspect_digest "$candidate_ref")" || {
+              echo "Unable to inspect validated candidate $candidate_ref" >&2
+              exit 1
+            }
+            candidate_digest["$final_ref"]="$digest"
+            for architecture in $architectures; do
+              verify_candidate_platform "$repository" "$digest" "$architecture" "$runtime"
+            done
+          done
+
+          promotion_started=false
+          publication_complete=false
+          on_exit() {
+            local status=$?
+            trap - EXIT
+            if [ "$status" -ne 0 ] && [ "$promotion_started" = true ] \
+              && [ "$publication_complete" != true ]; then
+              rollback_release || echo 'Paired release rollback was incomplete' >&2
+            fi
+            exit "$status"
+          }
+          trap on_exit EXIT
+          trap 'exit 1' INT TERM
+
+          promotion_started=true
+          for entry in "${entries[@]}"; do
+            IFS='|' read -r repository _ final_tag _ _ <<< "$entry"
+            final_ref="${repository}:${final_tag}"
+            digest="${candidate_digest[$final_ref]}"
+            docker buildx imagetools create --prefer-index=false --tag "$final_ref" "${repository}@${digest}"
+            actual="$(inspect_digest "$final_ref")"
+            if [ "$actual" != "$digest" ]; then
+              echo "Promoted digest mismatch for $final_ref" >&2
+              exit 1
+            fi
+          done
+          publication_complete=true
+
+          {
+            echo '## Paired HugeGraph release publication'
+            echo
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- Standard tag: \`$FINAL_BASE\`"
+            echo "- Topling tag: \`$FINAL_BASE-topling\`"
+            echo '- Result: all eight final tags promoted and verified'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup_candidates:
+    needs: [resolve_source, validate, promote]
+    if: ${{ needs.promote.result == 'success' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      CANDIDATE_BASE: ${{ needs.resolve_source.outputs.candidate_tag }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+    steps:
+      - name: Remove release candidate tags
+        run: |
+          set -euo pipefail
+          if [ -z "${CANDIDATE_BASE:-}" ]; then
+            echo 'No candidate tag was resolved; nothing to clean'
+            exit 0
+          fi
+          payload="$(jq -cn --arg username "$DOCKERHUB_USERNAME" \
+            --arg password "$DOCKERHUB_PASSWORD" \
+            '{username:$username,password:$password}')"
+          hub_token="$(
+            curl --fail-with-body -sS -L \
+              -H 'Content-Type: application/json' \
+              --data-binary "$payload" \
+              https://hub.docker.com/v2/users/login |
+              jq -er '.token // .access_token'
+          )"
+          for repository in hugegraph/pd hugegraph/store hugegraph/server hugegraph/hugegraph; do
+            for tag in "$CANDIDATE_BASE" "$CANDIDATE_BASE-topling"; do
+              status="$(curl -sS -L -o /tmp/delete-response -w '%{http_code}' -X DELETE \
+                -H "Authorization: Bearer $hub_token" \
+                "https://hub.docker.com/v2/repositories/${repository}/tags/${tag}/")"
+              case "$status" in
+                204|404) ;;
+                *) echo "WARN: candidate cleanup returned HTTP $status for ${repository}:${tag}" >&2 ;;
+              esac
+            done
+          done

@@ -23,6 +23,8 @@ Choose `source_repository` and `source_ref` to select the code to build. Set `im
 
 PD/Store/Server builds amd64 and arm64 images, then runs Compose and graph CRUD checks using the built amd64 images before publishing. Its smoke tests use 1 PD + 1 Store + 1 Server; they do not validate a production HA deployment. Sources with `docker/bake.hcl` share one Maven build; older sources use the per-Dockerfile path.
 
+PD/Store/Server release publication resolves one `apache/hugegraph` commit and automatically builds both standard `x.y.z` and Topling `x.y.z-topling` images from that commit. Standard images support amd64 and arm64; Topling requires Linux amd64 with a Haswell-compatible CPU. Scheduled latest runs stay standard; select `runtime_variant=topling` for an on-demand `latest-topling` run using the source-pinned JNI artifact. Compose selects this set with `HUGEGRAPH_VERSION=latest-topling`; Helm uses `--set global.runtimeVariant=topling`. See [Topling builds](docs/workflow-maintenance.md#topling-builds) for compatibility checks and explicit fork validation.
+
 ## Helm charts
 
 [Publish HugeGraph Helm](.github/workflows/publish_helm.yml) runs daily at 23:00 UTC alongside the latest PD/Store/Server image check, or manually with **Run workflow**. It packages `apache/hugegraph`'s `helm/hugegraph` directory for HugeGraph **1.8.0 and later**. The Chart is named `hugegraph-helm`.
