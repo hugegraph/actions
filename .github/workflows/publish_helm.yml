@@ -1,6 +1,8 @@
 name: Publish HugeGraph Helm
 
 on:
+  schedule:
+    - cron: '0 23 * * *'
   pull_request:
     paths:
       - '.github/workflows/publish_helm.yml'
@@ -30,6 +32,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: helm-${{ github.event_name == 'pull_request' && github.ref || (inputs.channel || 'dev') }}
+  cancel-in-progress: false
+
 jobs:
   source:
     runs-on: ubuntu-24.04
@@ -37,6 +43,8 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.source_sha }}
       ref: ${{ steps.resolve.outputs.source_ref }}
+      chart_sha: ${{ steps.changes.outputs.chart_sha }}
+      need_update: ${{ steps.changes.outputs.need_update }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,15 +58,26 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-          # PRs validate merged Apache master; manual runs use their selected ref.
+          # Scheduled runs and PRs use Apache master; manual runs use their selected ref.
           SOURCE_REF: ${{ inputs.source_ref || 'master' }}
           CHANNEL: ${{ inputs.channel || 'dev' }}
         run: |
           python .github/scripts/helm_release.py resolve --ref "$SOURCE_REF" --channel "$CHANNEL"
           printf 'source_ref=%s\n' "$SOURCE_REF" >> "$GITHUB_OUTPUT"
+      - name: Check the last commit affecting the Chart directory
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.source_sha }}
+          # Only daily development runs skip unchanged charts.
+          LAST_CHART_HASH: ${{ github.event_name == 'schedule' && vars.LAST_HELM_HASH || '' }}
+        run: >-
+          python .github/scripts/helm_release.py changes
+          --sha "$SOURCE_SHA" --last-hash "$LAST_CHART_HASH"
 
   chart_checks:
     needs: source
+    if: needs.source.outputs.need_update == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -195,7 +214,7 @@ jobs:
 
   publish:
     needs: [source, validate]
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -226,7 +245,7 @@ jobs:
         env:
           MANIFEST_SHA: ${{ needs.validate.outputs.manifest_sha }}
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
-          CHANNEL: ${{ inputs.channel }}
+          CHANNEL: ${{ inputs.channel || 'dev' }}
           RUN_NUMBER: ${{ github.run_number }}
           VERSION: ${{ needs.validate.outputs.version }}
           GH_TOKEN: ${{ github.token }}
@@ -245,3 +264,16 @@ jobs:
             echo "- GHCR and Docker Hub: hugegraph-helm $VERSION, authenticated and anonymous pulls match the tested package."
             echo "- Both OCI manifests have Cosign OIDC signatures, anonymously verified against https://github.com/$GITHUB_WORKFLOW_REF."
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Remember the successfully published Chart directory commit
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CHART_SHA: ${{ needs.source.outputs.chart_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo '::error::PERSONAL_ACCESS_TOKEN is required to update LAST_HELM_HASH'
+            exit 1
+          fi
+          gh variable set LAST_HELM_HASH --body "$CHART_SHA"

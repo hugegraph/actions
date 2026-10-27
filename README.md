@@ -25,7 +25,7 @@ PD/Store/Server builds amd64 and arm64 images, then runs Compose and graph CRUD 
 
 ## Helm charts
 
-[Publish HugeGraph Helm](.github/workflows/publish_helm.yml) packages `apache/hugegraph`'s `helm/hugegraph` directory for HugeGraph **1.8.0 and later**. The Chart is named `hugegraph-helm`.
+[Publish HugeGraph Helm](.github/workflows/publish_helm.yml) runs daily at 23:00 UTC alongside the latest PD/Store/Server image check, or manually with **Run workflow**. It packages `apache/hugegraph`'s `helm/hugegraph` directory for HugeGraph **1.8.0 and later**. The Chart is named `hugegraph-helm`.
 
 ![HugeGraph Helm validation and publication flow](.github/assets/helm-publishing-flow.png)
 
@@ -35,7 +35,9 @@ PD/Store/Server builds amd64 and arm64 images, then runs Compose and graph CRUD 
 | `channel` | `dev` | `dev` adds `-dev.<run_number>`; `release` uses the source Chart version |
 | `publish` | `true` | Publish after validation; uncheck to test and retain the package only |
 
-Chart and service versions are independent: Chart `0.2.1` can deploy HugeGraph `1.8.0`. Development packages allow `latest` images. Release packages require an already released service, fixed container images and a source commit in Apache master history. Maintain release versions in source; CI does not rewrite them.
+Daily runs publish development charts only when the last commit affecting `helm/hugegraph` changes. Java-only changes update the `latest` images without republishing the Chart. The last successful Chart commit is recorded only after both registries pass publication and verification; an unchanged Chart is skipped, and a failed update is retried on the next daily run. Manual runs always validate and can publish even when the Chart is unchanged.
+
+The `dev` channel follows Docker `latest`; `release` uses fixed service image versions and remains manual. Chart and service versions are independent: Chart `0.2.1` can deploy HugeGraph `1.8.0`. Development packages allow `latest` images. Release packages require an already released service, fixed container images and a source commit in Apache master history. Maintain release versions in source; CI does not rewrite them.
 
 CI checks the Chart, packages it once, and installs that same `.tgz` on a GitHub runner with **1 PD + 1 Store + 1 Server**, persistent storage enabled and Hubble disabled. Tests cover authentication, schema and graph CRUD, queries, and data survival after Pod recreation. Failures block publication. Pull requests run validation without publishing.
 

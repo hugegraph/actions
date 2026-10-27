@@ -9,6 +9,7 @@ For workflow inputs and everyday use, see the [README](../README.md).
 - Configure `DOCKERHUB_USERNAME` and `DOCKERHUB_PASSWORD` with write access to the destination Docker Hub repositories. The Helm repository is `hugegraph/hugegraph-helm` and must be public.
 - GHCR publication uses `GITHUB_TOKEN` with `packages: write`. An existing package must grant `hugegraph/actions` write access and allow anonymous pulls.
 - Latest image workflows can update their `LAST_*_HASH` repository variable after publication. Validation-only runs leave these variables unchanged.
+- Daily Helm runs use the same `PERSONAL_ACCESS_TOKEN` secret as latest image publishers to create or update `LAST_HELM_HASH`. Its value is the last commit affecting Apache's `helm/hugegraph` directory at the tested source revision. It advances only after both registries are published, signed and verified. No initial variable value is required; a missing value triggers the first publication. Manual runs and release runs leave it unchanged.
 
 ### Python indexes
 
