@@ -247,6 +247,7 @@ jobs:
     needs: prepare
     if: ${{ needs.prepare.outputs.need_update == 'true' && needs.prepare.outputs.has_smoke == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
