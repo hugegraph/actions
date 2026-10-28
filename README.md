@@ -23,6 +23,22 @@ Choose `source_repository` and `source_ref` to select the code to build. Set `im
 
 PD/Store/Server builds amd64 and arm64 images, then runs Compose and graph CRUD checks using the built amd64 images before publishing. Its smoke tests use 1 PD + 1 Store + 1 Server; they do not validate a production HA deployment. Sources with `docker/bake.hcl` share one Maven build; older sources use the per-Dockerfile path.
 
+The latest Vermeer publisher also runs the source revision's
+`vermeer/scripts/test-runtime-image.sh` against the built amd64 image before
+publishing. The check covers the secure runtime token helper, native administrator
+login and protected API behavior needed by Helm. Merge a source revision containing
+that script before adopting this publisher; a missing check fails the build.
+
+For a Vermeer candidate, select the trusted source repository, pin `source_ref` to
+the reviewed commit, and use a distinct tag such as `helm-<commit-prefix>`.
+First run with `publish=false`; publish the same commit/tag after validation.
+An explicit candidate tag does not update `latest` or its source-hash marker.
+Every completed generic image build records `image-publication.json` in a workflow
+artifact. Published builds include the registry digest and immutable image
+reference in the run summary; build-only runs explicitly report that no image was
+published. Use the published digest for Helm rather than treating a moving tag as
+proof of compatible application interfaces.
+
 ## Helm charts
 
 [Publish HugeGraph Helm](.github/workflows/publish_helm.yml) runs daily at 23:00 UTC alongside the latest PD/Store/Server image check, or manually with **Run workflow**. It packages `apache/hugegraph`'s `helm/hugegraph` directory for HugeGraph **1.8.0 and later**. The Chart is named `hugegraph-helm`.

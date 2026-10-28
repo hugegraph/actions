@@ -1,0 +1,31 @@
+name: Image publisher checks
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/_publish_image_reusable.yml'
+      - '.github/workflows/publish_latest_vermeer_image.yml'
+      - '.github/workflows/check_image_publisher.yml'
+      - 'tests/test_vermeer_publisher.py'
+      - 'tests/test_publish_prepare.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Verify publication provenance and source gates
+        run: |
+          python -m unittest discover -s tests -p 'test_vermeer_publisher.py' -v
+          bash tests/test_publish_prepare.sh

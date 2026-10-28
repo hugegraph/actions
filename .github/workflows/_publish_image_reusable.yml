@@ -390,6 +390,7 @@ jobs:
         docker rm -f graph || true
 
     - name: Build and push image with mvn args (${{ matrix.module }})
+      id: build_with_mvn
       if: ${{ inputs.use_mvn_args }}
       uses: docker/build-push-action@v7
       with:
@@ -404,6 +405,7 @@ jobs:
         build-args: ${{ inputs.mvn_args }}
 
     - name: Build and push image (${{ matrix.module }})
+      id: build
       if: ${{ !inputs.use_mvn_args }}
       uses: docker/build-push-action@v7
       with:
@@ -415,6 +417,46 @@ jobs:
         labels: ${{ env.IMAGE_LABELS }}
         cache-from: ${{ steps.params.outputs.cache_from }}
         cache-to: ${{ steps.params.outputs.cache_to_max }}
+
+    - name: Record image provenance (${{ matrix.module }})
+      env:
+        IMAGE_URL: ${{ steps.params.outputs.image_url }}
+        IMAGE_DIGEST: ${{ steps.build.outputs.digest || steps.build_with_mvn.outputs.digest }}
+        IMAGE_PLATFORMS: ${{ steps.params.outputs.platforms }}
+        SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+        SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        PUBLISH_IMAGES: ${{ needs.prepare.outputs.publish_images }}
+      run: |
+        set -euo pipefail
+        if [ "$PUBLISH_IMAGES" = true ] && ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          echo "Published image has no valid digest; cannot record a reproducible deployment reference" >&2
+          exit 1
+        fi
+        jq -n --arg image "$IMAGE_URL" --arg digest "$IMAGE_DIGEST" \
+          --arg source_repository "$SOURCE_REPOSITORY" --arg source_sha "$SOURCE_SHA" \
+          --arg platforms "$IMAGE_PLATFORMS" --argjson published "$PUBLISH_IMAGES" \
+          '{image:$image, digest:$digest, source_repository:$source_repository,
+            source_sha:$source_sha, platforms:($platforms|split(",")), published:$published}' \
+          > image-publication.json
+        {
+          echo "### Image provenance"
+          echo
+          echo "- Source: ${SOURCE_REPOSITORY}@${SOURCE_SHA}"
+          echo "- Image: ${IMAGE_URL}"
+          if [ "$PUBLISH_IMAGES" = true ]; then
+            echo "- Immutable reference: ${IMAGE_URL%:*}@${IMAGE_DIGEST}"
+          else
+            echo "- Build validation only; no image or cache was published."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload image provenance (${{ matrix.module }})
+      uses: actions/upload-artifact@v7
+      with:
+        name: image-publication-${{ inputs.component }}-${{ matrix.module }}
+        path: image-publication.json
+        if-no-files-found: error
+        retention-days: 7
 
   update_latest_hash:
     needs: [prepare, publish]
