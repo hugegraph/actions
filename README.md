@@ -29,6 +29,12 @@ publishing. The check covers the secure runtime token helper, native administrat
 login and protected API behavior needed by Helm. Merge a source revision containing
 that script before adopting this publisher; a missing check fails the build.
 
+Source-provided smoke commands run in a separate job with read-only repository
+permissions, no publishing credentials, and no cache exports. Publication waits
+for every required smoke check, then uses a fresh runner and checkout of the same
+resolved commit. It rebuilds the image without reusing smoke-job files or images;
+registry login and cache writes occur only in the publication job.
+
 For a Vermeer candidate, select the trusted source repository, pin `source_ref` to
 the reviewed commit, and use a distinct tag such as `helm-<commit-prefix>`.
 First run with `publish=false`; publish the same commit/tag after validation.
