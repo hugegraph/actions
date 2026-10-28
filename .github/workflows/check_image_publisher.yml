@@ -7,6 +7,7 @@ on:
       - '.github/workflows/publish_latest_vermeer_image.yml'
       - '.github/workflows/check_image_publisher.yml'
       - 'tests/test_vermeer_publisher.py'
+      - 'tests/test_smoke_timeout.py'
       - 'tests/test_publish_prepare.sh'
   workflow_dispatch:
 
@@ -28,4 +29,5 @@ jobs:
       - name: Verify publication provenance and source gates
         run: |
           python -m unittest discover -s tests -p 'test_vermeer_publisher.py' -v
+          python -m unittest discover -s tests -p 'test_smoke_timeout.py' -v
           bash tests/test_publish_prepare.sh
