@@ -46,7 +46,8 @@ jobs:
             "registry_cache_image": "hugegraph/vermeer:buildcache-latest",
             "platforms_latest": "linux/amd64,linux/arm64",
             "platforms_release": "linux/amd64,linux/arm64",
-            "smoke_test": false
+            "smoke_test": true,
+            "smoke_test_cmd": "bash vermeer/scripts/test-runtime-image.sh \"$IMAGE_URL\""
           }
         ]
       enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph-computer') == 'apache/hugegraph-computer' && (inputs.source_ref || 'master') == 'master' && (inputs.image_tag || '') == '') }}
