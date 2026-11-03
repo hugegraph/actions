@@ -21,14 +21,14 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: hugegraph/hugegraph-ai
-          ref: 42d9a50a33426f832d9dd63d676a897c56a65842
+          ref: 143f90f29577ac8ff1103e9732bad80b5e82070c
           fetch-depth: 1
           persist-credentials: false
 
       - name: Verify immutable source
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "42d9a50a33426f832d9dd63d676a897c56a65842"
+          test "$(git rev-parse HEAD)" = "143f90f29577ac8ff1103e9732bad80b5e82070c"
           grep -qF 'nk-llm = ["hugegraph-llm", "hugegraph-python", "nuitka"]' pyproject.toml
           grep -qF 'python docker/patch_litellm_nuitka.py' docker/Dockerfile.nk
           test -f docker/patch_litellm_nuitka.py
@@ -52,8 +52,8 @@ jobs:
           tags: hugegraph/rag-bin:nuitka-compat-test
           cache-from: |
             type=registry,ref=hugegraph/rag-bin:buildcache-latest
-            type=gha,scope=rag-bin-nuitka-compat-v3
-          cache-to: type=gha,scope=rag-bin-nuitka-compat-v3,mode=min
+            type=gha,scope=rag-bin-nuitka-compat-v4
+          cache-to: type=gha,scope=rag-bin-nuitka-compat-v4,mode=min
 
       - name: Inspect compiled image
         run: |
