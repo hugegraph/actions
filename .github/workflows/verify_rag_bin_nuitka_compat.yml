@@ -11,7 +11,11 @@ permissions:
 jobs:
   build-rag-bin:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # A successful standalone Nuitka build takes materially longer than the
+    # original failing parse, so the compatibility proof must cover the full
+    # compile, image load, and executable inspection rather than stop at the
+    # former assertion point.
+    timeout-minutes: 90
     steps:
       - name: Checkout fixed HugeGraph AI source
         uses: actions/checkout@v7
@@ -46,7 +50,9 @@ jobs:
           push: false
           load: true
           tags: hugegraph/rag-bin:nuitka-compat-test
-          cache-from: type=registry,ref=hugegraph/rag-bin:buildcache-latest
+          cache-from: |
+            type=registry,ref=hugegraph/rag-bin:buildcache-latest
+            type=gha,scope=rag-bin-nuitka-compat-v3
           cache-to: type=gha,scope=rag-bin-nuitka-compat-v3,mode=min
 
       - name: Inspect compiled image
