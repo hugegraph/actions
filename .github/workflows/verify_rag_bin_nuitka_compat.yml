@@ -1,0 +1,52 @@
+name: Verify rag-bin Nuitka compatibility
+
+on:
+  push:
+    branches:
+      - test/rag-bin-nuitka-compat-20261104
+
+permissions:
+  contents: read
+
+jobs:
+  build-rag-bin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout fixed HugeGraph AI source
+        uses: actions/checkout@v7
+        with:
+          repository: hugegraph/hugegraph-ai
+          ref: 546c38a14d81db72e6a096d6286067ec9b59a0ae
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify immutable source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "546c38a14d81db72e6a096d6286067ec9b59a0ae"
+          grep -qF 'nuitka==4.3.3' pyproject.toml
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          version: latest
+
+      - name: Build the same rag-bin Dockerfile
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./docker/Dockerfile.nk
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: hugegraph/rag-bin:nuitka-compat-test
+          cache-from: type=registry,ref=hugegraph/rag-bin:buildcache-latest
+          cache-to: type=gha,scope=rag-bin-nuitka-compat,mode=min
+
+      - name: Inspect compiled image
+        run: |
+          set -euo pipefail
+          docker image inspect hugegraph/rag-bin:nuitka-compat-test >/dev/null
+          docker run --rm --entrypoint /bin/sh hugegraph/rag-bin:nuitka-compat-test -c \
+            'test -x /home/work/hugegraph-llm/app.dist/app.bin && python --version'
