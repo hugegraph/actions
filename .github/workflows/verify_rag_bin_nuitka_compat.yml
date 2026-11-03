@@ -21,14 +21,14 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: hugegraph/hugegraph-ai
-          ref: 143f90f29577ac8ff1103e9732bad80b5e82070c
+          ref: a288c0ac7c7d058408bb638c8c0c628fb4f537fe
           fetch-depth: 1
           persist-credentials: false
 
       - name: Verify immutable source
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "143f90f29577ac8ff1103e9732bad80b5e82070c"
+          test "$(git rev-parse HEAD)" = "a288c0ac7c7d058408bb638c8c0c628fb4f537fe"
           grep -qF 'nk-llm = ["hugegraph-llm", "hugegraph-python", "nuitka"]' pyproject.toml
           grep -qF 'python docker/patch_litellm_nuitka.py' docker/Dockerfile.nk
           test -f docker/patch_litellm_nuitka.py
