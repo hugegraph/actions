@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: hugegraph/hugegraph-ai
-          ref: ce32dc8f7d9aefb45f11355e71461457ffdd49d6
+          ref: 4882f98c621f27bda0416d5e2dc9730617e79ddb
           fetch-depth: 1
           persist-credentials: false
 
