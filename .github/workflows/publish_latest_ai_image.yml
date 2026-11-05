@@ -23,17 +23,31 @@ on:
         default: true
         description: 'Push images to Dockerhub'
 
+permissions:
+  contents: read
+
 concurrency:
   group: publish-ai-latest-${{ inputs.source_repository || 'apache/hugegraph-ai' }}-${{ inputs.image_tag || 'latest' }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   initialize_hash_variables:
     name: Initialize per-image hash variables
-    if: ${{ vars.LAST_AI_RAG_HASH == '' || vars.LAST_AI_RAG_BIN_HASH == '' }}
+    if: >-
+      ${{
+        (vars.LAST_AI_RAG_HASH == '' || vars.LAST_AI_RAG_BIN_HASH == '') &&
+        (
+          github.event_name != 'workflow_dispatch' ||
+          (
+            inputs.publish == true &&
+            (inputs.source_repository || 'apache/hugegraph-ai') == 'apache/hugegraph-ai' &&
+            (inputs.source_ref || 'main') == 'main' &&
+            (inputs.image_tag || '') == ''
+          )
+        )
+      }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
     - name: Create missing hash variables
       env:
