@@ -42,8 +42,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Validate benchmark script
+      - name: Validate benchmark environment
         run: |
+          docker version
           python3 -m py_compile .github/scripts/benchmark_ai_images.py
           python3 .github/scripts/benchmark_ai_images.py --help >/dev/null
       - name: Benchmark published images
