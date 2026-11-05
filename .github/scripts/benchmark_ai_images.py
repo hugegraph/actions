@@ -147,7 +147,14 @@ def benchmark_start(image: str, label: str, round_number: int, timeout_seconds: 
         ready_seconds, status = wait_until_ready(name, started_at, timeout_seconds)
         # Give the freshly ready process a brief, identical settling interval.
         time.sleep(1)
-        memory_text = run("docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", name).stdout.strip()
+        memory_text = run(
+            "docker",
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.MemUsage}}",
+            name,
+        ).stdout.strip()
         return {
             "round": round_number,
             "ready_seconds": round(ready_seconds, 3),
@@ -160,38 +167,90 @@ def benchmark_start(image: str, label: str, round_number: int, timeout_seconds: 
 
 
 def benchmark_image(label: str, image: str, rounds: int, timeout_seconds: float) -> dict[str, Any]:
-    print(f"::group::Pull {label} ({image})", flush=True)
-    pull_started = time.monotonic()
-    pull = run("docker", "pull", image)
-    pull_seconds = time.monotonic() - pull_started
-    print(pull.stdout, end="")
-    print(pull.stderr, end="", file=sys.stderr)
-    print("::endgroup::", flush=True)
+    """Benchmark one image without discarding metadata when startup fails."""
 
-    size_bytes = int(run("docker", "image", "inspect", "--format", "{{.Size}}", image).stdout.strip())
-    repo_digests = json.loads(run("docker", "image", "inspect", "--format", "{{json .RepoDigests}}", image).stdout)
-
-    starts: list[dict[str, Any]] = []
-    for round_number in range(1, rounds + 1):
-        print(f"Benchmarking {label} startup round {round_number}/{rounds}", flush=True)
-        starts.append(benchmark_start(image, label, round_number, timeout_seconds))
-
-    ready_values = [entry["ready_seconds"] for entry in starts]
-    memory_values = [entry["memory_bytes"] for entry in starts]
-    return {
+    result: dict[str, Any] = {
         "label": label,
         "image": image,
-        "repo_digests": repo_digests,
-        "local_size_bytes": size_bytes,
-        "pull_seconds": round(pull_seconds, 3),
-        "starts": starts,
-        "median_ready_seconds": round(statistics.median(ready_values), 3),
-        "median_memory_bytes": round(statistics.median(memory_values)),
+        "status": "failed",
+        "starts": [],
     }
+
+    print(f"::group::Pull {label} ({image})", flush=True)
+    pull_started = time.monotonic()
+    try:
+        pull = run("docker", "pull", image)
+        result["pull_seconds"] = round(time.monotonic() - pull_started, 3)
+        print(pull.stdout, end="")
+        print(pull.stderr, end="", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - preserve operational diagnostics in the artifact
+        result["pull_seconds"] = round(time.monotonic() - pull_started, 3)
+        result["error"] = str(error)
+        return result
+    finally:
+        print("::endgroup::", flush=True)
+
+    try:
+        result["local_size_bytes"] = int(
+            run("docker", "image", "inspect", "--format", "{{.Size}}", image).stdout.strip()
+        )
+        result["repo_digests"] = json.loads(
+            run(
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RepoDigests}}",
+                image,
+            ).stdout
+        )
+    except Exception as error:  # noqa: BLE001 - preserve operational diagnostics in the artifact
+        result["error"] = str(error)
+        return result
+
+    for round_number in range(1, rounds + 1):
+        print(f"Benchmarking {label} startup round {round_number}/{rounds}", flush=True)
+        try:
+            result["starts"].append(
+                benchmark_start(image, label, round_number, timeout_seconds)
+            )
+        except Exception as error:  # noqa: BLE001 - the failed image is the benchmark result
+            result["starts"].append({"round": round_number, "error": str(error)})
+            result["error"] = str(error)
+            print(f"{label} startup failed: {error}", file=sys.stderr, flush=True)
+            break
+
+    successful_starts = [entry for entry in result["starts"] if "ready_seconds" in entry]
+    if successful_starts:
+        result["median_ready_seconds"] = round(
+            statistics.median(entry["ready_seconds"] for entry in successful_starts),
+            3,
+        )
+        result["median_memory_bytes"] = round(
+            statistics.median(entry["memory_bytes"] for entry in successful_starts)
+        )
+    if len(successful_starts) == rounds:
+        result["status"] = "ready"
+    return result
 
 
 def mib(value: int | float) -> float:
     return value / 1024**2
+
+
+def concise_error(value: str) -> str:
+    """Return the most useful final diagnostic line for the Markdown summary."""
+
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    return lines[-1] if lines else "unknown error"
+
+
+def optional_seconds(value: Any) -> str:
+    return f"{value:.3f}s" if isinstance(value, int | float) else "—"
+
+
+def optional_mib(value: Any) -> str:
+    return f"{mib(value):.1f} MiB" if isinstance(value, int | float) else "—"
 
 
 def render_summary(results: dict[str, Any]) -> str:
@@ -200,31 +259,70 @@ def render_summary(results: dict[str, Any]) -> str:
         "",
         "The images are pulled once, then each container is started repeatedly on the same runner. ",
         "HTTP-ready time ends at the first response from `/`; ready RSS is sampled one second later.",
+        "A startup failure is recorded as a benchmark result instead of discarding successful image data.",
         "",
-        "| Image | Local size | Pull | Startup runs | Median startup | Median ready RSS |",
-        "| --- | ---: | ---: | --- | ---: | ---: |",
+        "| Image | Status | Local size | Pull | Startup runs | Median startup | Median ready RSS |",
+        "| --- | --- | ---: | ---: | --- | ---: | ---: |",
     ]
     for image in results["images"]:
-        starts = ", ".join(f"{entry['ready_seconds']:.3f}s" for entry in image["starts"])
+        starts = ", ".join(
+            optional_seconds(entry.get("ready_seconds"))
+            if "ready_seconds" in entry
+            else f"round {entry['round']}: failed"
+            for entry in image["starts"]
+        ) or "—"
+        status = "✅ ready" if image["status"] == "ready" else "❌ failed"
         lines.append(
-            f"| `{image['image']}` | {mib(image['local_size_bytes']):.1f} MiB | "
-            f"{image['pull_seconds']:.1f}s | {starts} | {image['median_ready_seconds']:.3f}s | "
-            f"{mib(image['median_memory_bytes']):.1f} MiB |"
+            f"| `{image['image']}` | {status} | {optional_mib(image.get('local_size_bytes'))} | "
+            f"{optional_seconds(image.get('pull_seconds'))} | {starts} | "
+            f"{optional_seconds(image.get('median_ready_seconds'))} | "
+            f"{optional_mib(image.get('median_memory_bytes'))} |"
         )
 
-    comparison = results.get("comparison")
+    comparison = results.get("comparison", {})
     if comparison:
-        lines.extend(
-            [
-                "",
-                "### Binary / Python ratios",
-                "",
-                f"- Local image size: **{comparison['local_size_ratio']:.2f}×**",
-                f"- Median HTTP-ready startup: **{comparison['startup_ratio']:.2f}×**",
-                f"- Median ready RSS: **{comparison['memory_ratio']:.2f}×**",
-            ]
-        )
+        lines.extend(["", "### Binary / Python ratios", ""])
+        if "local_size_ratio" in comparison:
+            lines.append(f"- Local image size: **{comparison['local_size_ratio']:.2f}×**")
+        if "startup_ratio" in comparison:
+            lines.append(
+                f"- Median HTTP-ready startup: **{comparison['startup_ratio']:.2f}×**"
+            )
+        if "memory_ratio" in comparison:
+            lines.append(f"- Median ready RSS: **{comparison['memory_ratio']:.2f}×**")
+
+    failures = [image for image in results["images"] if image.get("error")]
+    if failures:
+        lines.extend(["", "### Startup or pull failures", ""])
+        for image in failures:
+            lines.append(f"- `{image['image']}`: `{concise_error(image['error'])}`")
     return "\n".join(lines) + "\n"
+
+
+def build_comparison(images: list[dict[str, Any]]) -> dict[str, float]:
+    by_label = {entry["label"]: entry for entry in images}
+    if not {"rag", "rag-bin"} <= by_label.keys():
+        return {}
+
+    source = by_label["rag"]
+    binary = by_label["rag-bin"]
+    comparison: dict[str, float] = {}
+    if source.get("local_size_bytes") and binary.get("local_size_bytes"):
+        comparison["local_size_ratio"] = round(
+            binary["local_size_bytes"] / source["local_size_bytes"],
+            3,
+        )
+    if source.get("median_ready_seconds") and binary.get("median_ready_seconds"):
+        comparison["startup_ratio"] = round(
+            binary["median_ready_seconds"] / source["median_ready_seconds"],
+            3,
+        )
+    if source.get("median_memory_bytes") and binary.get("median_memory_bytes"):
+        comparison["memory_ratio"] = round(
+            binary["median_memory_bytes"] / source["median_memory_bytes"],
+            3,
+        )
+    return comparison
 
 
 def main() -> int:
@@ -250,6 +348,10 @@ def main() -> int:
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
 
+    image_results = [
+        benchmark_image(label, image, args.rounds, args.timeout)
+        for label, image in images
+    ]
     results: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),
         "runner": {
@@ -259,20 +361,10 @@ def main() -> int:
         },
         "rounds": args.rounds,
         "timeout_seconds": args.timeout,
-        "images": [
-            benchmark_image(label, image, args.rounds, args.timeout)
-            for label, image in images
-        ],
+        "all_images_ready": all(image["status"] == "ready" for image in image_results),
+        "images": image_results,
+        "comparison": build_comparison(image_results),
     }
-    by_label = {entry["label"]: entry for entry in results["images"]}
-    if {"rag", "rag-bin"} <= by_label.keys():
-        source = by_label["rag"]
-        binary = by_label["rag-bin"]
-        results["comparison"] = {
-            "local_size_ratio": round(binary["local_size_bytes"] / source["local_size_bytes"], 3),
-            "startup_ratio": round(binary["median_ready_seconds"] / source["median_ready_seconds"], 3),
-            "memory_ratio": round(binary["median_memory_bytes"] / source["median_memory_bytes"], 3),
-        }
 
     args.output.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     summary = render_summary(results)
