@@ -1,0 +1,63 @@
+name: Benchmark AI Images
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/benchmark_ai_images.yml'
+      - '.github/scripts/benchmark_ai_images.py'
+  workflow_dispatch:
+    inputs:
+      rag_image:
+        description: Python runtime image
+        required: false
+        default: hugegraph/rag:latest
+        type: string
+      rag_bin_image:
+        description: Nuitka runtime image
+        required: false
+        default: hugegraph/rag-bin:latest
+        type: string
+      rounds:
+        description: Startup rounds per image
+        required: false
+        default: '3'
+        type: choice
+        options: ['1', '3', '5']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-ai-images-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate benchmark script
+        run: |
+          python3 -m py_compile .github/scripts/benchmark_ai_images.py
+          python3 .github/scripts/benchmark_ai_images.py --help >/dev/null
+      - name: Benchmark published images
+        run: >-
+          python3 .github/scripts/benchmark_ai_images.py
+          --image "rag=${{ inputs.rag_image || 'hugegraph/rag:latest' }}"
+          --image "rag-bin=${{ inputs.rag_bin_image || 'hugegraph/rag-bin:latest' }}"
+          --rounds "${{ inputs.rounds || '3' }}"
+          --output ai-image-benchmark.json
+      - name: Upload benchmark result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ai-image-benchmark
+          path: ai-image-benchmark.json
+          if-no-files-found: warn
+          retention-days: 14
