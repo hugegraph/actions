@@ -1,10 +1,6 @@
 name: Benchmark AI Images
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/benchmark_ai_images.yml'
-      - '.github/scripts/benchmark_ai_images.py'
   workflow_dispatch:
     inputs:
       rag_image:
@@ -28,14 +24,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: benchmark-ai-images-${{ github.event.pull_request.number || github.ref }}
+  group: benchmark-ai-images
   cancel-in-progress: true
 
 jobs:
   benchmark:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -50,9 +43,9 @@ jobs:
       - name: Benchmark published images
         run: >-
           python3 .github/scripts/benchmark_ai_images.py
-          --image "rag=${{ inputs.rag_image || 'hugegraph/rag:latest' }}"
-          --image "rag-bin=${{ inputs.rag_bin_image || 'hugegraph/rag-bin:latest' }}"
-          --rounds "${{ inputs.rounds || '3' }}"
+          --image "rag=${{ inputs.rag_image }}"
+          --image "rag-bin=${{ inputs.rag_bin_image }}"
+          --rounds "${{ inputs.rounds }}"
           --output ai-image-benchmark.json
       - name: Upload benchmark result
         if: ${{ always() }}
