@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
-      AI_SHA: ea6675c348e6c9bdaa711bef477bd9477fb12284
+      AI_SHA: 72899b9da40a9b5dcaad15a00c3ec504596d56a4
       IMAGE: local/rag-bin:pr97-validation
     steps:
       - name: Check out benchmark tooling
@@ -87,7 +87,7 @@ jobs:
           probe = prefix + '''
 
           FROM builder AS dependency-probe
-          RUN /build/.venv/bin/python -c "import PIL; assert PIL.__version__ == '13.0.0'"
+          RUN /build/.venv/bin/python -c "import filelock, PIL; assert PIL.__version__ == '13.0.0'; assert tuple(map(int, filelock.__version__.split('.'))) >= (4, 2, 1)"
           '''
           Path('/tmp/Dockerfile.rag-bin-dependency-probe').write_text(probe, encoding='utf-8')
           PY
