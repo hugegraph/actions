@@ -1,0 +1,214 @@
+name: Validate rag-bin PR97 build and runtime
+
+on:
+  push:
+    branches:
+      - ci/validate-rag-bin-pr97-20261107
+    paths:
+      - .github/workflows/validate_rag_bin_pr97.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-rag-bin-pr97-20261107
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      AI_SHA: ea6675c348e6c9bdaa711bef477bd9477fb12284
+      IMAGE: local/rag-bin:pr97-validation
+    steps:
+      - name: Check out benchmark tooling
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check out HugeGraph-AI PR head
+        uses: actions/checkout@v6
+        with:
+          repository: hugegraph/hugegraph-ai
+          ref: ${{ env.AI_SHA }}
+          path: source
+          persist-credentials: false
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          docker system prune --all --force || true
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build the PR rag-bin image
+        id: build
+        run: |
+          set -euo pipefail
+          started=$(date +%s)
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --progress=plain \
+            --cache-from type=registry,ref=hugegraph/rag-bin:buildcache-latest \
+            --file source/docker/Dockerfile.nk \
+            --tag "$IMAGE" \
+            source 2>&1 | tee rag-bin-build.log
+          finished=$(date +%s)
+          seconds=$((finished - started))
+          echo "seconds=$seconds" >> "$GITHUB_OUTPUT"
+          echo "Full rag-bin build: ${seconds}s" >> "$GITHUB_STEP_SUMMARY"
+          docker image inspect "$IMAGE" --format 'Image ID: {{.Id}}; local size: {{.Size}} bytes' \
+            | tee rag-bin-image-inspect.txt
+
+      - name: Verify runtime image contents
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh "$IMAGE" -ec '
+            test -x /home/work/hugegraph-llm/app.dist/app.bin
+            test ! -e /home/work/hugegraph-llm/app.build
+            test ! -e /home/work/hugegraph-llm/pyproject.toml
+            test ! -e /home/work/hugegraph-llm/src/app.build
+          '
+
+      - name: Verify source-only changes reuse the locked dependency layer
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('source/docker/Dockerfile.nk').read_text(encoding='utf-8')
+          prefix, marker, _ = source.partition('\nCOPY . .\n')
+          if not marker:
+              raise SystemExit('Could not locate the source COPY boundary')
+          probe = prefix + '''
+
+          FROM builder AS dependency-probe
+          RUN /build/.venv/bin/python -c "import PIL; assert PIL.__version__ == '13.0.0'"
+          '''
+          Path('/tmp/Dockerfile.rag-bin-dependency-probe').write_text(probe, encoding='utf-8')
+          PY
+          printf '\n# source-only dependency cache probe\n' \
+            >> source/hugegraph-llm/src/hugegraph_llm/api/rag_api.py
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --progress=plain \
+            --target dependency-probe \
+            --file /tmp/Dockerfile.rag-bin-dependency-probe \
+            --tag local/rag-bin:dependency-probe \
+            source 2>&1 | tee dependency-cache-probe.log
+          python3 - <<'PY'
+          from pathlib import Path
+
+          log = Path('dependency-cache-probe.log').read_text(encoding='utf-8')
+          needle = 'uv sync --locked --no-install-workspace --extra nk-llm'
+          start = log.find(needle)
+          if start < 0:
+              raise SystemExit('Dependency sync step was absent from the BuildKit log')
+          if 'CACHED' not in log[start : start + 2500]:
+              raise SystemExit('Locked dependency sync was not reused after a source-only change')
+          PY
+
+      - name: Benchmark published rag and local rag-bin
+        env:
+          BUILD_SECONDS: ${{ steps.build.outputs.seconds }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import importlib.util
+          import json
+          import os
+          import platform
+          import statistics
+          from datetime import UTC, datetime
+          from pathlib import Path
+
+          script = Path('.github/scripts/benchmark_ai_images.py')
+          spec = importlib.util.spec_from_file_location('benchmark_ai_images', script)
+          if spec is None or spec.loader is None:
+              raise SystemExit('Unable to load benchmark helper')
+          benchmark = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(benchmark)
+
+          rounds = 3
+          timeout = 300.0
+          source = benchmark.benchmark_image('rag', 'hugegraph/rag:latest', rounds, timeout)
+
+          image = os.environ['IMAGE']
+          binary = {
+              'label': 'rag-bin',
+              'image': image,
+              'status': 'failed',
+              'pull_seconds': 0.0,
+              'starts': [],
+              'local_size_bytes': int(
+                  benchmark.run('docker', 'image', 'inspect', '--format', '{{.Size}}', image).stdout.strip()
+              ),
+              'repo_digests': [],
+          }
+          for round_number in range(1, rounds + 1):
+              try:
+                  binary['starts'].append(
+                      benchmark.benchmark_start(image, 'rag-bin-pr97', round_number, timeout)
+                  )
+              except Exception as error:  # noqa: BLE001 - retain benchmark diagnostics
+                  binary['starts'].append({'round': round_number, 'error': str(error)})
+                  binary['error'] = str(error)
+                  break
+
+          successful = [entry for entry in binary['starts'] if 'ready_seconds' in entry]
+          if successful:
+              binary['median_ready_seconds'] = round(
+                  statistics.median(entry['ready_seconds'] for entry in successful), 3
+              )
+              binary['median_container_memory_bytes'] = round(
+                  statistics.median(entry['container_memory_bytes'] for entry in successful)
+              )
+          if len(successful) == rounds:
+              binary['status'] = 'ready'
+
+          images = [source, binary]
+          results = {
+              'generated_at': datetime.now(UTC).isoformat(),
+              'source_sha': os.environ['AI_SHA'],
+              'build_seconds': int(os.environ['BUILD_SECONDS']),
+              'runner': {
+                  'platform': platform.platform(),
+                  'machine': platform.machine(),
+                  'python': platform.python_version(),
+              },
+              'rounds': rounds,
+              'timeout_seconds': timeout,
+              'all_images_ready': all(entry['status'] == 'ready' for entry in images),
+              'images': images,
+              'comparison': benchmark.build_comparison(images),
+          }
+          Path('rag-bin-pr97-benchmark.json').write_text(
+              json.dumps(results, indent=2) + '\n', encoding='utf-8'
+          )
+          summary = benchmark.render_summary(results)
+          print(summary)
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as stream:
+              stream.write('\n' + summary)
+          if not results['all_images_ready']:
+              raise SystemExit('One or more benchmark images did not become ready')
+          PY
+
+      - name: Upload build and benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rag-bin-pr97-validation
+          path: |
+            rag-bin-build.log
+            rag-bin-image-inspect.txt
+            dependency-cache-probe.log
+            rag-bin-pr97-benchmark.json
+          if-no-files-found: warn
+          retention-days: 14
