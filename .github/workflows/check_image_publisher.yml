@@ -4,8 +4,10 @@ on:
   pull_request:
     paths:
       - '.github/workflows/_publish_image_reusable.yml'
+      - '.github/workflows/publish_latest_ai_image.yml'
       - '.github/workflows/publish_latest_vermeer_image.yml'
       - '.github/workflows/check_image_publisher.yml'
+      - 'tests/test_ai_image_publisher.py'
       - 'tests/test_vermeer_publisher.py'
       - 'tests/test_smoke_timeout.py'
       - 'tests/test_publish_prepare.sh'
@@ -28,6 +30,7 @@ jobs:
       - run: python -m pip install PyYAML==6.0.3
       - name: Verify publication provenance and source gates
         run: |
+          python -m unittest discover -s tests -p 'test_ai_image_publisher.py' -v
           python -m unittest discover -s tests -p 'test_vermeer_publisher.py' -v
           python -m unittest discover -s tests -p 'test_smoke_timeout.py' -v
           bash tests/test_publish_prepare.sh

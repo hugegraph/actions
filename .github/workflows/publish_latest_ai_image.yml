@@ -23,49 +23,180 @@ on:
         default: true
         description: 'Push images to Dockerhub'
 
+permissions:
+  contents: read
+
+# Serialize writes to the same destination tag. The default single pending slot
+# keeps the newest request instead of accumulating stale latest-image builds.
+concurrency:
+  group: publish-ai-latest-${{ inputs.image_tag || 'latest' }}
+  cancel-in-progress: false
+
 jobs:
+  prepare:
+    name: Resolve source and image checkpoints
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.prepare.outputs.source_sha }}
+      default_source: ${{ steps.prepare.outputs.default_source }}
+      image_tag: ${{ steps.prepare.outputs.image_tag }}
+      enable_hash_gate: ${{ steps.prepare.outputs.enable_hash_gate }}
+      rag_hash: ${{ steps.prepare.outputs.rag_hash }}
+      rag_bin_hash: ${{ steps.prepare.outputs.rag_bin_hash }}
+    steps:
+    - name: Resolve one immutable source revision
+      id: prepare
+      env:
+        SOURCE_REPOSITORY: ${{ inputs.source_repository || 'apache/hugegraph-ai' }}
+        SOURCE_REF: ${{ inputs.source_ref || 'main' }}
+        REQUESTED_IMAGE_TAG: ${{ inputs.image_tag || '' }}
+        PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
+        GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        LEGACY_HASH: ${{ vars.LAST_AI_HASH }}
+        RAG_HASH: ${{ vars.LAST_AI_RAG_HASH }}
+        RAG_BIN_HASH: ${{ vars.LAST_AI_RAG_BIN_HASH }}
+      run: |
+        set -euo pipefail
+
+        case "$SOURCE_REPOSITORY" in
+          apache/hugegraph-ai|hugegraph/hugegraph-ai) ;;
+          *)
+            echo "Source repository is not allowed: $SOURCE_REPOSITORY"
+            exit 1
+            ;;
+        esac
+
+        if ! [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          if ! git check-ref-format "refs/heads/$SOURCE_REF" >/dev/null 2>&1 \
+            && ! git check-ref-format "refs/tags/$SOURCE_REF" >/dev/null 2>&1; then
+            echo "Invalid source ref: $SOURCE_REF"
+            exit 1
+          fi
+        fi
+
+        source_url="https://github.com/${SOURCE_REPOSITORY}.git"
+        source_sha="$(git ls-remote "$source_url" "refs/heads/${SOURCE_REF}" \
+          | awk 'NR == 1 { print $1 }')"
+        if [ -z "$source_sha" ]; then
+          source_sha="$(git ls-remote "$source_url" "refs/tags/${SOURCE_REF}^{}" \
+            | awk 'NR == 1 { print $1 }')"
+        fi
+        if [ -z "$source_sha" ]; then
+          source_sha="$(git ls-remote "$source_url" "refs/tags/${SOURCE_REF}" \
+            | awk 'NR == 1 { print $1 }')"
+        fi
+        if [ -z "$source_sha" ] && [[ "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          source_sha="${SOURCE_REF,,}"
+        fi
+        if ! [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "Failed to resolve source SHA for ${SOURCE_REPOSITORY}@${SOURCE_REF}"
+          exit 1
+        fi
+
+        default_source="apache/hugegraph-ai@main"
+        default_source_match="false"
+        if [ "$SOURCE_REPOSITORY" = "apache/hugegraph-ai" ] && [ "$SOURCE_REF" = "main" ]; then
+          default_source_match="true"
+          # The reusable publisher receives a SHA, so make its default-source
+          # comparison use the same immutable revision while retaining latest.
+          default_source="${SOURCE_REPOSITORY}@${source_sha}"
+        fi
+
+        image_tag="$REQUESTED_IMAGE_TAG"
+        if [ -z "$image_tag" ] && [ "$default_source_match" != "true" ]; then
+          if [ "$PUBLISH" = "true" ]; then
+            echo "image_tag is required when publishing a non-default source"
+            exit 1
+          fi
+          image_tag="$(
+            printf '%s' "$SOURCE_REF" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[.-]+//; s/[.-]+$//' \
+            | cut -c1-110
+          )"
+          if [ -z "$image_tag" ]; then
+            echo "Failed to derive an image tag from source ref: $SOURCE_REF"
+            exit 1
+          fi
+        fi
+
+        enable_hash_gate="false"
+        if [ "$default_source_match" = "true" ] && [ -z "$REQUESTED_IMAGE_TAG" ]; then
+          enable_hash_gate="true"
+        fi
+
+        initial_hash="${LEGACY_HASH:-uninitialized}"
+        rag_hash="${RAG_HASH:-$initial_hash}"
+        rag_bin_hash="${RAG_BIN_HASH:-$initial_hash}"
+
+        # Create only missing component checkpoints. Outputs carry the seeded
+        # values into this run, so no job relies on vars being refreshed mid-run.
+        if [ "$enable_hash_gate" = "true" ] && [ "$PUBLISH" = "true" ] \
+          && { [ -z "$RAG_HASH" ] || [ -z "$RAG_BIN_HASH" ]; }; then
+          if [ -z "$GH_TOKEN" ]; then
+            echo "PERSONAL_ACCESS_TOKEN is required to initialize image hash variables"
+            exit 1
+          fi
+          if [ -z "$RAG_HASH" ]; then
+            gh variable set LAST_AI_RAG_HASH --body "$rag_hash" --repo hugegraph/actions
+          fi
+          if [ -z "$RAG_BIN_HASH" ]; then
+            gh variable set LAST_AI_RAG_BIN_HASH --body "$rag_bin_hash" --repo hugegraph/actions
+          fi
+        fi
+
+        {
+          echo "source_sha=$source_sha"
+          echo "default_source=$default_source"
+          echo "image_tag=$image_tag"
+          echo "enable_hash_gate=$enable_hash_gate"
+          echo "rag_hash=$rag_hash"
+          echo "rag_bin_hash=$rag_bin_hash"
+        } >> "$GITHUB_OUTPUT"
+
   publish:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: rag
+            dockerfile: ./docker/Dockerfile.llm
+            image_repo: hugegraph/rag
+            platforms: linux/amd64,linux/arm64
+            last_hash_value: "${{ needs.prepare.outputs.rag_hash }}"
+            last_hash_name: LAST_AI_RAG_HASH
+          - module: rag-bin
+            dockerfile: ./docker/Dockerfile.nk
+            image_repo: hugegraph/rag-bin
+            platforms: linux/amd64
+            last_hash_value: "${{ needs.prepare.outputs.rag_bin_hash }}"
+            last_hash_name: LAST_AI_RAG_BIN_HASH
     uses: ./.github/workflows/_publish_image_reusable.yml
     with:
       mode: latest
       component: ai
       source_repository: ${{ inputs.source_repository || 'apache/hugegraph-ai' }}
       allowed_source_repositories: apache/hugegraph-ai,hugegraph/hugegraph-ai
-      source_ref: ${{ inputs.source_ref || 'main' }}
-      default_source: apache/hugegraph-ai@main
-      image_tag: ${{ inputs.image_tag || '' }}
+      source_ref: ${{ needs.prepare.outputs.source_sha }}
+      default_source: ${{ needs.prepare.outputs.default_source }}
+      image_tag: ${{ needs.prepare.outputs.image_tag }}
       publish: ${{ github.event_name != 'workflow_dispatch' || inputs.publish == true }}
-      # IMPORTANT:
-      # - Keep ARM enabled for normal RAG image (Dockerfile.llm).
-      # - Keep rag-bin (Dockerfile.nk) on amd64 only due to arm incompatibility.
-      build_matrix_json: |
-        [
-          {
-            "module": "rag",
-            "context": ".",
-            "dockerfile": "./docker/Dockerfile.llm",
-            "image_repo_latest": "hugegraph/rag",
-            "image_repo_release": "hugegraph/rag",
-            "registry_cache_image": "hugegraph/rag:buildcache-latest",
-            "platforms_latest": "linux/amd64,linux/arm64",
-            "platforms_release": "linux/amd64,linux/arm64",
-            "smoke_test": false
-          },
-          {
-            "module": "rag-bin",
-            "context": ".",
-            "dockerfile": "./docker/Dockerfile.nk",
-            "image_repo_latest": "hugegraph/rag-bin",
-            "image_repo_release": "hugegraph/rag-bin",
-            "registry_cache_image": "hugegraph/rag-bin:buildcache-latest",
-            "platforms_latest": "linux/amd64",
-            "platforms_release": "linux/amd64",
-            "smoke_test": false
-          }
-        ]
-      enable_hash_gate: ${{ github.event_name != 'workflow_dispatch' || ((inputs.source_repository || 'apache/hugegraph-ai') == 'apache/hugegraph-ai' && (inputs.source_ref || 'main') == 'main' && (inputs.image_tag || '') == '') }}
-      last_hash_value: ${{ vars.LAST_AI_HASH }}
-      last_hash_name: LAST_AI_HASH
+      build_matrix_json: >-
+        [{
+          "module": "${{ matrix.module }}",
+          "context": ".",
+          "dockerfile": "${{ matrix.dockerfile }}",
+          "image_repo_latest": "${{ matrix.image_repo }}",
+          "image_repo_release": "${{ matrix.image_repo }}",
+          "registry_cache_image": "${{ matrix.image_repo }}:buildcache-latest",
+          "platforms_latest": "${{ matrix.platforms }}",
+          "platforms_release": "${{ matrix.platforms }}",
+          "smoke_test": false
+        }]
+      enable_hash_gate: ${{ needs.prepare.outputs.enable_hash_gate == 'true' }}
+      last_hash_value: ${{ matrix.last_hash_value }}
+      last_hash_name: ${{ matrix.last_hash_name }}
       hash_repo_owner: hugegraph
       hash_repo_name: actions
     secrets: inherit
