@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
-      AI_SHA: 72899b9da40a9b5dcaad15a00c3ec504596d56a4
+      AI_SHA: 7031ace85fa0d93146d8fe347141732a61be672b
       IMAGE: local/rag-bin:pr97-validation
     steps:
       - name: Check out benchmark tooling
