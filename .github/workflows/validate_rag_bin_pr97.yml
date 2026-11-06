@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: validate-rag-bin-pr97-20261107
+  group: validate-rag-bin-pr97-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
